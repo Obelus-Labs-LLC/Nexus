@@ -1,0 +1,28 @@
+# Nexus Project Registry
+# Copy this file to nexus.toml and customize paths for your setup.
+#
+# Projects can be standalone or grouped into clusters.
+# Clusters enable cross-project dependency resolution via nexus_cross_project.
+
+# Example: a cluster of related Rust projects
+[cluster.mystack]
+cross_project = true
+
+[cluster.mystack.project.core]
+root = "/path/to/core"
+languages = ["rust"]
+entry_points = ["src/main.rs", "src/lib.rs"]
+ignore = ["target"]
+
+[cluster.mystack.project.api]
+root = "/path/to/api"
+languages = ["python"]
+entry_points = ["app/main.py"]
+ignore = ["__pycache__", ".venv"]
+
+# Example: standalone project (no cluster)
+[project.webapp]
+root = "/path/to/webapp"
+languages = ["python", "typescript"]
+max_files = 50000
+ignore = ["node_modules", ".next", "dist"]

@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nexus — Project Observatory</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface2: #1a1a25;
+    --border: #2a2a3a;
+    --text: #e0e0e8;
+    --text-dim: #8888a0;
+    --accent: #6366f1;
+    --accent2: #818cf8;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --cyan: #22d3ee;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  .header {
+    padding: 24px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .header h1 {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.5px;
+  }
+
+  .header h1 span { color: var(--accent); }
+
+  .header-stats {
+    display: flex;
+    gap: 24px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .header-stats strong { color: var(--text); font-weight: 500; }
+
+  .main { padding: 24px 32px; }
+
+  /* Summary row */
+  .summary-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+
+  .stat-card .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-card .value { font-size: 28px; font-weight: 600; margin-top: 4px; }
+  .stat-card .sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+  /* Cluster section */
+  .section-title {
+    font-size: 14px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin: 24px 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* Project grid */
+  .project-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .project-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    cursor: pointer;
+    transition: border-color 0.15s, transform 0.1s;
+  }
+
+  .project-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+  }
+
+  .project-card.expanded { border-color: var(--accent); }
+
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+  }
+
+  .card-name {
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .card-cluster {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--surface2);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .card-langs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 10px;
+  }
+
+  .lang-tag {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 500;
+  }
+
+  .lang-python { background: #1e3a5f; color: #60a5fa; }
+  .lang-rust { background: #3d1f0f; color: #fb923c; }
+  .lang-typescript { background: #1a2e4a; color: #38bdf8; }
+  .lang-javascript { background: #3d3a0f; color: #facc15; }
+  .lang-c { background: #1f2d1f; color: #86efac; }
+  .lang-go { background: #1a3333; color: #5eead4; }
+  .lang-java { background: #3d1f1f; color: #fca5a5; }
+
+  .card-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    font-size: 12px;
+  }
+
+  .metric { text-align: center; }
+  .metric .num { font-size: 16px; font-weight: 600; color: var(--text); }
+  .metric .lbl { font-size: 10px; color: var(--text-dim); }
+
+  /* Complexity bar */
+  .complexity-bar {
+    margin-top: 10px;
+    height: 3px;
+    background: var(--surface2);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .complexity-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s;
+  }
+
+  /* Expanded details */
+  .card-details {
+    display: none;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+  }
+
+  .card-details.show { display: block; }
+
+  .detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .detail-item { color: var(--text-dim); }
+  .detail-item strong { color: var(--text); font-weight: 500; }
+
+  .top-symbols {
+    margin-top: 8px;
+    font-size: 11px;
+  }
+
+  .top-symbols .sym {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sym-name { color: var(--accent2); font-family: 'JetBrains Mono', monospace; }
+  .sym-edges { color: var(--text-dim); }
+
+  /* Cluster connections */
+  .cluster-connections {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+
+  .connection {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+  }
+
+  .conn-arrow { color: var(--accent); font-size: 14px; }
+  .conn-count {
+    font-size: 11px;
+    padding: 1px 6px;
+    background: var(--surface2);
+    border-radius: 10px;
+    color: var(--text-dim);
+  }
+
+  .not-indexed {
+    color: var(--text-dim);
+    font-style: italic;
+    font-size: 12px;
+    padding: 8px;
+    text-align: center;
+  }
+
+  /* Loading */
+  .loading {
+    text-align: center;
+    padding: 48px;
+    color: var(--text-dim);
+  }
+
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .loading { animation: pulse 1.5s infinite; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1><span>N</span>exus Observatory</h1>
+  <div class="header-stats" id="headerStats"></div>
+</div>
+<div class="main" id="app">
+  <div class="loading">Loading project data...</div>
+</div>
+
+<script>
+const LANG_COLORS = {
+  python: 'lang-python', rust: 'lang-rust', typescript: 'lang-typescript',
+  javascript: 'lang-javascript', c: 'lang-c', go: 'lang-go', java: 'lang-java',
+};
+
+const COMPLEXITY_COLORS = ['#34d399', '#6366f1', '#fbbf24', '#fb923c', '#f87171'];
+
+function fmt(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return n.toString();
+}
+
+function fmtBytes(b) {
+  if (b >= 1e9) return (b/1e9).toFixed(1) + ' GB';
+  if (b >= 1e6) return (b/1e6).toFixed(1) + ' MB';
+  if (b >= 1e3) return (b/1e3).toFixed(1) + ' KB';
+  return b + ' B';
+}
+
+function complexityScore(p) {
+  if (!p.indexed) return 0;
+  // Weighted complexity: symbols * edge density * language count
+  const edgeDensity = p.symbols > 0 ? p.edges / p.symbols : 0;
+  const langCount = Object.keys(p.language_breakdown || {}).length;
+  return Math.log10(Math.max(1, p.symbols)) * (1 + edgeDensity) * Math.max(1, langCount);
+}
+
+function complexityColor(score, maxScore) {
+  const ratio = maxScore > 0 ? score / maxScore : 0;
+  const idx = Math.min(4, Math.floor(ratio * 5));
+  return COMPLEXITY_COLORS[idx];
+}
+
+async function load() {
+  let projRes, clusterRes;
+  try {
+    [projRes, clusterRes] = await Promise.all([
+      fetch('/api/projects').then(r => r.json()),
+      fetch('/api/clusters').then(r => r.json()),
+    ]);
+  } catch(e) {
+    document.getElementById('app').innerHTML = `<div class="loading" style="animation:none;color:var(--red)">API error: ${e.message}</div>`;
+    return;
+  }
+
+  // Handle both dict and list responses
+  const projects = Array.isArray(projRes) ? projRes : Object.values(projRes);
+  const indexed = projects.filter(p => p.indexed);
+
+  // Header stats
+  // Ensure all indexed projects have required fields with defaults
+  indexed.forEach(p => {
+    p.files = p.files || 0;
+    p.symbols = p.symbols || 0;
+    p.edges = p.edges || 0;
+    p.total_lines = p.total_lines || 0;
+    p.total_bytes = p.total_bytes || 0;
+    p.language_breakdown = p.language_breakdown || {};
+    p.symbol_kinds = p.symbol_kinds || {};
+    p.edge_kinds = p.edge_kinds || {};
+    p.top_symbols = p.top_symbols || [];
+    p.recent_sessions_7d = p.recent_sessions_7d || 0;
+    p.active_decisions = p.active_decisions || 0;
+    p.unresolved_imports = p.unresolved_imports || 0;
+  });
+
+  const totalFiles = indexed.reduce((s, p) => s + p.files, 0);
+  const totalSymbols = indexed.reduce((s, p) => s + p.symbols, 0);
+  const totalEdges = indexed.reduce((s, p) => s + p.edges, 0);
+  const totalLines = indexed.reduce((s, p) => s + p.total_lines, 0);
+  const totalBytes = indexed.reduce((s, p) => s + p.total_bytes, 0);
+
+  document.getElementById('headerStats').innerHTML = `
+    <span><strong>${indexed.length}</strong> / ${projects.length} projects indexed</span>
+    <span><strong>${fmt(totalFiles)}</strong> files</span>
+    <span><strong>${fmt(totalSymbols)}</strong> symbols</span>
+    <span><strong>${fmt(totalEdges)}</strong> edges</span>
+    <span><strong>${fmt(totalLines)}</strong> lines</span>
+    <span><strong>${fmtBytes(totalBytes)}</strong></span>
+  `;
+
+  // Group by cluster
+  const clusters = {};
+  const standalone = [];
+  projects.forEach(p => {
+    if (p.cluster) {
+      (clusters[p.cluster] = clusters[p.cluster] || []).push(p);
+    } else {
+      standalone.push(p);
+    }
+  });
+
+  const maxComplexity = Math.max(...projects.map(complexityScore), 1);
+
+  let html = '';
+
+  // Summary cards
+  html += '<div class="summary-row">';
+  html += `<div class="stat-card"><div class="label">Total Projects</div><div class="value">${projects.length}</div><div class="sub">${indexed.length} indexed</div></div>`;
+  html += `<div class="stat-card"><div class="label">Total Code</div><div class="value">${fmt(totalLines)}</div><div class="sub">lines across all projects</div></div>`;
+  html += `<div class="stat-card"><div class="label">Symbols</div><div class="value">${fmt(totalSymbols)}</div><div class="sub">functions, classes, methods</div></div>`;
+  html += `<div class="stat-card"><div class="label">Edges</div><div class="value">${fmt(totalEdges)}</div><div class="sub">imports, contains, references</div></div>`;
+  html += `<div class="stat-card"><div class="label">Storage</div><div class="value">${fmtBytes(totalBytes)}</div><div class="sub">source code indexed</div></div>`;
+  html += '</div>';
+
+  // Render clusters
+  for (const [cluster, cProjects] of Object.entries(clusters)) {
+    html += `<div class="section-title">${cluster} cluster</div>`;
+
+    // Cross-project connections
+    const edges = clusterRes[cluster] || [];
+    if (edges.length > 0) {
+      html += '<div class="cluster-connections">';
+      // Deduplicate edges
+      const seen = new Set();
+      edges.forEach(e => {
+        const key = [e.source, e.target].sort().join('↔');
+        if (!seen.has(key)) {
+          seen.add(key);
+          html += `<div class="connection">
+            <span>${e.source}</span>
+            <span class="conn-arrow">↔</span>
+            <span>${e.target}</span>
+            <span class="conn-count">${e.count} edges</span>
+          </div>`;
+        }
+      });
+      html += '</div>';
+    }
+
+    html += '<div class="project-grid">';
+    cProjects.forEach(p => { html += renderCard(p, maxComplexity); });
+    html += '</div>';
+  }
+
+  // Standalone projects
+  if (standalone.length) {
+    html += '<div class="section-title">Standalone</div>';
+    html += '<div class="project-grid">';
+    standalone.forEach(p => { html += renderCard(p, maxComplexity); });
+    html += '</div>';
+  }
+
+  document.getElementById('app').innerHTML = html;
+
+  // Click handlers
+  document.querySelectorAll('.project-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const details = card.querySelector('.card-details');
+      if (details) {
+        details.classList.toggle('show');
+        card.classList.toggle('expanded');
+      }
+    });
+  });
+}
+
+function renderCard(p, maxComplexity) {
+  if (!p.indexed) {
+    return `<div class="project-card">
+      <div class="card-header">
+        <div class="card-name">${p.name}</div>
+        ${p.cluster ? `<div class="card-cluster">${p.cluster}</div>` : ''}
+      </div>
+      <div class="not-indexed">Not indexed — run nexus scan</div>
+    </div>`;
+  }
+
+  const score = complexityScore(p);
+  const pct = maxComplexity > 0 ? (score / maxComplexity * 100) : 0;
+  const color = complexityColor(score, maxComplexity);
+  const langs = Object.entries(p.language_breakdown || {});
+  const kinds = Object.entries(p.symbol_kinds || {});
+  const topSyms = p.top_symbols || [];
+
+  return `<div class="project-card">
+    <div class="card-header">
+      <div class="card-name">${p.name}</div>
+      ${p.cluster ? `<div class="card-cluster">${p.cluster}</div>` : ''}
+    </div>
+    <div class="card-langs">
+      ${langs.map(([l, c]) => `<span class="lang-tag ${LANG_COLORS[l] || ''}">${l} ${c}</span>`).join('')}
+    </div>
+    <div class="card-metrics">
+      <div class="metric"><div class="num">${fmt(p.files)}</div><div class="lbl">files</div></div>
+      <div class="metric"><div class="num">${fmt(p.symbols)}</div><div class="lbl">symbols</div></div>
+      <div class="metric"><div class="num">${fmt(p.edges)}</div><div class="lbl">edges</div></div>
+      <div class="metric"><div class="num">${fmt(p.total_lines)}</div><div class="lbl">lines</div></div>
+    </div>
+    <div class="complexity-bar">
+      <div class="complexity-fill" style="width:${pct}%;background:${color}"></div>
+    </div>
+    <div class="card-details">
+      <div class="detail-grid">
+        <div class="detail-item">Size: <strong>${fmtBytes(p.total_bytes)}</strong></div>
+        <div class="detail-item">Unresolved: <strong>${p.unresolved_imports}</strong></div>
+        <div class="detail-item">Sessions (7d): <strong>${p.recent_sessions_7d}</strong></div>
+        <div class="detail-item">Decisions: <strong>${p.active_decisions}</strong></div>
+        ${p.last_scan_ms != null ? `<div class="detail-item">Last scan: <strong>${p.last_scan_ms}ms</strong></div>` : ''}
+      </div>
+      ${kinds.length ? `<div style="margin-top:8px;color:var(--text-dim)">
+        ${kinds.map(([k, c]) => `<span style="margin-right:8px">${k}: ${c}</span>`).join('')}
+      </div>` : ''}
+      ${topSyms.length ? `<div class="top-symbols">
+        <div style="color:var(--text-dim);margin-bottom:4px">Most connected:</div>
+        ${topSyms.slice(0, 5).map(s =>
+          `<div class="sym"><span class="sym-name">${s.name}</span><span>${s.kind}</span><span class="sym-edges">${s.edges} edges</span></div>`
+        ).join('')}
+      </div>` : ''}
+    </div>
+  </div>`;
+}
+
+load();
+setInterval(load, 30000); // Auto-refresh every 30s
+</script>
+</body>
+</html>
