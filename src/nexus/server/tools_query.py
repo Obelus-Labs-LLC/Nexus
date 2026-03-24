@@ -210,6 +210,167 @@ def register(mcp):
         return "\n".join(lines)
 
     @mcp.tool()
+    def nexus_deps(
+        path: str = "",
+        direction: str = "both",
+    ) -> str:
+        """Get the dependency map for files in the project or a specific directory.
+
+        For each file, shows what it imports from other modules, what imports it,
+        and what it exports (public symbols). Essential for refactoring — tells you
+        exactly which cross-references break when you move a file.
+
+        Args:
+            path: Directory or file path relative to project root. Empty = entire project.
+            direction: "imports" (what this file uses), "importers" (what uses this file), or "both".
+        """
+        check_rate_limit()
+        db = get_db()
+        config = get_config()
+
+        with db.connect() as conn:
+            # Get files, optionally filtered by directory
+            if path:
+                files = conn.execute(
+                    "SELECT id, path, language FROM files WHERE path LIKE ? ORDER BY path",
+                    (path.rstrip("/") + "/%",)
+                ).fetchall()
+                # Also check if it's an exact file match
+                exact = conn.execute(
+                    "SELECT id, path, language FROM files WHERE path = ?", (path,)
+                ).fetchone()
+                if exact and not files:
+                    files = [exact]
+                elif exact:
+                    existing_ids = {f["id"] for f in files}
+                    if exact["id"] not in existing_ids:
+                        files = [exact] + list(files)
+            else:
+                files = conn.execute(
+                    "SELECT id, path, language FROM files ORDER BY path"
+                ).fetchall()
+
+            if not files:
+                return f"No files found matching '{path}'"
+
+            lines = [f"## Dependency Map: {path or config.name}", f"Files: {len(files)}", ""]
+
+            for f in files:
+                file_id = f["id"]
+                file_path = f["path"]
+
+                # Get exports: public symbols defined in this file
+                exports = conn.execute(
+                    "SELECT name, kind, signature FROM symbols "
+                    "WHERE file_id = ? AND visibility = 'public' "
+                    "ORDER BY kind, name",
+                    (file_id,)
+                ).fetchall()
+
+                # Get what this file imports FROM other files (outgoing edges)
+                imports_from = conn.execute(
+                    """SELECT DISTINCT f2.path, s2.name, e.kind as edge_kind
+                    FROM edges e
+                    JOIN symbols s1 ON e.source_id = s1.id
+                    JOIN symbols s2 ON e.target_id = s2.id
+                    JOIN files f2 ON s2.file_id = f2.id
+                    WHERE s1.file_id = ? AND s2.file_id != ?
+                    AND e.kind IN ('imports', 'references', 'calls')
+                    ORDER BY f2.path, s2.name""",
+                    (file_id, file_id)
+                ).fetchall()
+
+                # Get what imports THIS file (incoming edges)
+                imported_by = conn.execute(
+                    """SELECT DISTINCT f1.path, s1.name, e.kind as edge_kind
+                    FROM edges e
+                    JOIN symbols s1 ON e.source_id = s1.id
+                    JOIN symbols s2 ON e.target_id = s2.id
+                    JOIN files f1 ON s1.file_id = f1.id
+                    WHERE s2.file_id = ? AND s1.file_id != ?
+                    AND e.kind IN ('imports', 'references', 'calls')
+                    ORDER BY f1.path, s1.name""",
+                    (file_id, file_id)
+                ).fetchall()
+
+                # Get unresolved imports for this file
+                unresolved = conn.execute(
+                    "SELECT import_path FROM unresolved_imports WHERE file_id = ? ORDER BY import_path",
+                    (file_id,)
+                ).fetchall()
+
+                # Skip files with no dependencies if there are many files
+                if len(files) > 10 and not imports_from and not imported_by and not exports:
+                    continue
+
+                lines.append(f"### {file_path}")
+
+                if exports and direction in ("both", "exports"):
+                    export_strs = [f"{e['kind']} {e['name']}" for e in exports]
+                    lines.append(f"  exports: [{', '.join(export_strs)}]")
+
+                if imports_from and direction in ("both", "imports"):
+                    # Group by file
+                    by_file: dict[str, list[str]] = {}
+                    for row in imports_from:
+                        by_file.setdefault(row["path"], []).append(row["name"])
+                    imports_str = ", ".join(f"{fp}::{','.join(names)}" for fp, names in by_file.items())
+                    lines.append(f"  imports_from: [{imports_str}]")
+
+                if imported_by and direction in ("both", "importers"):
+                    # Group by file
+                    by_file2: dict[str, list[str]] = {}
+                    for row in imported_by:
+                        by_file2.setdefault(row["path"], []).append(row["name"])
+                    importers_str = ", ".join(f"{fp}" for fp in sorted(by_file2.keys()))
+                    lines.append(f"  imported_by: [{importers_str}]")
+
+                if unresolved:
+                    lines.append(f"  unresolved: [{', '.join(u['import_path'] for u in unresolved)}]")
+
+                lines.append("")
+
+            # Summary: circular dependency detection
+            lines.append("---")
+
+            # Build adjacency for cycle detection
+            adj: dict[str, set[str]] = {}
+            for f in files:
+                file_id = f["id"]
+                file_path = f["path"]
+                deps = conn.execute(
+                    """SELECT DISTINCT f2.path
+                    FROM edges e
+                    JOIN symbols s1 ON e.source_id = s1.id
+                    JOIN symbols s2 ON e.target_id = s2.id
+                    JOIN files f2 ON s2.file_id = f2.id
+                    WHERE s1.file_id = ? AND s2.file_id != ?
+                    AND e.kind IN ('imports', 'references', 'calls')""",
+                    (file_id, file_id)
+                ).fetchall()
+                adj[file_path] = {d["path"] for d in deps}
+
+            # Find mutual dependencies (A->B and B->A)
+            cycles = []
+            seen_pairs: set[tuple[str, str]] = set()
+            for a, deps_a in adj.items():
+                for b in deps_a:
+                    if b in adj and a in adj[b]:
+                        pair = tuple(sorted([a, b]))
+                        if pair not in seen_pairs:
+                            seen_pairs.add(pair)
+                            cycles.append(pair)
+
+            if cycles:
+                lines.append(f"Circular dependencies found: {len(cycles)}")
+                for a, b in cycles[:20]:
+                    lines.append(f"  {a} <-> {b}")
+            else:
+                lines.append("No circular dependencies detected.")
+
+        return "\n".join(lines)
+
+    @mcp.tool()
     def nexus_analytics(days: int = 30) -> str:
         """View query history analytics -- what Claude asks for most, which files are hot/cold.
 

@@ -31,13 +31,14 @@ class TestToolRegistration:
             "nexus_analytics",
             "nexus_enrich",
             "nexus_cross_project",
+            "nexus_deps",
         }
         assert set(tools.keys()) == expected
 
     def test_tool_count(self):
         from nexus.server.mcp import mcp
 
-        assert len(mcp._tool_manager._tools) == 12
+        assert len(mcp._tool_manager._tools) == 13
 
 
 class TestNexusScan:

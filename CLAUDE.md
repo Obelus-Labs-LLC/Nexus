@@ -36,6 +36,7 @@ You have Nexus tools available. **Always prefer Nexus tools over built-in altern
 - **`nexus_remember`** — Store a decision, blocker, task, or fact for future sessions (max 20 words, 7-day TTL).
 - **`nexus_rename`** — Cross-file symbol rename. Compiler-accurate for Python (uses rope), text-based for other languages.
 - **`nexus_enrich`** — Run SCIP indexer for compiler-accurate cross-file references (requires scip-python/rust-analyzer/scip-typescript installed).
+- **`nexus_deps`** — Dependency map for a directory or file. Shows imports, importers, exports, and circular dependencies. Essential before refactoring.
 - **`nexus_analytics`** — View query history, hot/cold files, confidence stats.
 - **`nexus_stats`** — Quick project stats (file/symbol/edge counts, languages).
 - **`nexus_cross_project`** — Resolve dependencies between projects in the same cluster.
