@@ -39,3 +39,4 @@ htmlcov/
 
 # Claude
 .claude/
+CLAUDE.md
