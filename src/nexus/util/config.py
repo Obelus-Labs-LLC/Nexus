@@ -14,6 +14,7 @@ _DEFAULT_IGNORE = [
     "target",  # Rust
     ".nexus",
     ".venv", "venv", ".env",
+    "vendor", "third_party", "reference",  # vendored/reference code
     "*.pyc", "*.pyo", "*.so", "*.dylib", "*.dll",
     "*.min.js", "*.min.css",
     "*.lock",
