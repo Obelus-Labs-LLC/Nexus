@@ -256,7 +256,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", len(body))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
@@ -266,7 +265,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 def serve(port: int = 7420):
     import sys
-    server = HTTPServer(("0.0.0.0", port), DashboardHandler)
+    server = HTTPServer(("127.0.0.1", port), DashboardHandler)
     # Print to both stdout and stderr so preview systems detect the port
     msg = f"Nexus Dashboard: http://127.0.0.1:{port}"
     print(msg, flush=True)
