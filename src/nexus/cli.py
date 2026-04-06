@@ -179,6 +179,9 @@ def _cmd_import(args: argparse.Namespace) -> None:
     print(f"Queries: {counts['queries']}")
 
 
+_HOOK_DEBOUNCE_MS = 5000  # Minimum 5 seconds between hook-triggered reindexes
+
+
 def _cmd_hook() -> None:
     """Process a Claude Code PostToolUse hook event.
 
@@ -187,8 +190,12 @@ def _cmd_hook() -> None:
 
     Only triggers for Write, Edit, and MultiEdit tools. Exits silently (code 0)
     for anything else so the hook never blocks Claude.
+
+    Debounced: if another hook ran within the last 5 seconds for the same
+    project, this invocation exits immediately to avoid redundant reindexing.
     """
     import json
+    import time
 
     try:
         data = json.loads(sys.stdin.read())
@@ -214,6 +221,18 @@ def _cmd_hook() -> None:
 
     if project_root is None:
         sys.exit(0)
+
+    # Debounce: skip if another hook reindexed this project recently
+    nexus_dir = project_root / ".nexus"
+    lock_file = nexus_dir / "_hook_lock"
+    try:
+        if lock_file.exists():
+            age_ms = (time.time() - lock_file.stat().st_mtime) * 1000
+            if age_ms < _HOOK_DEBOUNCE_MS:
+                sys.exit(0)  # Another hook is handling it
+        lock_file.write_text(str(time.time()))
+    except Exception:
+        pass  # Don't block on lock file errors
 
     try:
         from nexus.index.pipeline import index_project

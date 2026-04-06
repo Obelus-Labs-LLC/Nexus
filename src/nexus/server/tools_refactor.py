@@ -16,6 +16,10 @@ from nexus.server.state import (
 
 logger = logging.getLogger("nexus.server.tools")
 
+# Docstring generation budget: hard cap per MCP server session
+MAX_DOCSTRING_CALLS_PER_SESSION = 40
+_docstring_calls_this_session = 0
+
 
 def _insert_docstring(file_path: Path, def_line: int, kind: str, docstring: str) -> bool:
     """Insert a docstring into a Python source file after a def/class line.
@@ -427,12 +431,26 @@ def register(mcp):
         if not rows:
             return f"No undocumented public symbols found{' in ' + path if path else ''}."
 
+        # Session-wide budget: cap total Anthropic API calls across invocations
+        global _docstring_calls_this_session
+        remaining_budget = MAX_DOCSTRING_CALLS_PER_SESSION - _docstring_calls_this_session
+        if remaining_budget <= 0:
+            return (
+                f"Session docstring budget exhausted ({MAX_DOCSTRING_CALLS_PER_SESSION} calls). "
+                "Start a new session to generate more docstrings."
+            )
+
+        effective_limit = min(len(rows), remaining_budget)
+        if effective_limit < len(rows):
+            logger.info("Docstring budget: %d remaining, capping at %d (of %d found)",
+                        remaining_budget, effective_limit, len(rows))
+
         client = anthropic.Anthropic(api_key=api_key)
         processed = 0
         skipped = 0
         results = []
 
-        for sym in rows:
+        for sym in rows[:effective_limit]:
             sig = sym["signature"] or sym["name"]
             body = (sym["body_text"] or "")[:600]  # Limit body to avoid huge prompts
 
@@ -445,11 +463,16 @@ def register(mcp):
             )
 
             try:
+                # Throttle: minimum 1.5s between Anthropic API calls
+                import time as _time
+                _time.sleep(1.5)
+
                 message = client.messages.create(
                     model="claude-haiku-4-5-20251001",
                     max_tokens=200,
                     messages=[{"role": "user", "content": prompt}],
                 )
+                _docstring_calls_this_session += 1
                 docstring = message.content[0].text.strip().strip('"\'')
 
                 if not docstring:
@@ -470,12 +493,15 @@ def register(mcp):
 
             except Exception as e:
                 skipped += 1
+                _docstring_calls_this_session += 1  # Count failed attempts too
                 logger.warning("Docstring generation failed for %s: %s", sym["qualified"], e)
 
+        budget_remaining = MAX_DOCSTRING_CALLS_PER_SESSION - _docstring_calls_this_session
         lines = [
             f"## nexus_docstring{'(dry run)' if dry_run else ''}",
             f"Processed: {processed} symbols | Skipped: {skipped}",
             f"Total undocumented: {len(rows)}",
+            f"API budget remaining: {budget_remaining}/{MAX_DOCSTRING_CALLS_PER_SESSION} calls this session",
             "",
         ]
 

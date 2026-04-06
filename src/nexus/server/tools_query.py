@@ -14,6 +14,7 @@ from nexus.server.state import (
     get_tracker,
     register_active_session,
     reload_tuned_weights,
+    track_token_usage,
 )
 
 logger = logging.getLogger("nexus.server.tools")
@@ -303,8 +304,10 @@ def register(mcp):
         lines.append("")
         lines.append(context)
 
+        result = "\n".join(lines)
+        track_token_usage(len(result), "nexus_start")
         logger.info("nexus_start: %s, confidence=%s, files=%d", config.name, confidence, len(fused))
-        return "\n".join(lines)
+        return result
 
     @mcp.tool()
     def nexus_retrieve(
@@ -367,7 +370,9 @@ def register(mcp):
             context,
         ]
 
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        track_token_usage(len(result), "nexus_retrieve")
+        return result
 
     @mcp.tool()
     def nexus_stats() -> str:

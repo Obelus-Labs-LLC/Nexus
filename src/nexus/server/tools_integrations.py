@@ -312,12 +312,12 @@ def register(mcp):
         return format_nlp_result(result)
 
     @mcp.tool()
-    def nexus_analytics(
+    def nexus_ext_analytics(
         mode: str = "status",
         collection: str = "",
         wikidata_query: str = "",
     ) -> str:
-        """Fetch analytics data or look up knowledge from Wikidata.
+        """Fetch external analytics data or look up knowledge from Wikidata.
 
         Modes:
           status   — show Keen IO event counts for a collection

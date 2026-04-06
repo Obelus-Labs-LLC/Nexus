@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator
@@ -15,9 +17,19 @@ from nexus.util.config import ProjectConfig
 
 logger = logging.getLogger("nexus.server")
 
-# Rate limiting: max tool calls per session
+# ── Rate limiting ────────────────────────────────────────────────────────────
 MAX_CALLS_PER_MINUTE = 120
 _call_timestamps: list[float] = []
+
+# ── Token budget tracking ────────────────────────────────────────────────────
+MAX_SESSION_INPUT_TOKENS = 500_000  # Hard cap on estimated input tokens per session
+_session_tokens: dict[str, int] = {"input": 0, "output": 0}
+
+# ── Kill switch ──────────────────────────────────────────────────────────────
+_KILL_FILE = Path.home() / ".nexus" / "KILL"
+
+# ── Audit log ────────────────────────────────────────────────────────────────
+_AUDIT_LOG = Path.home() / ".nexus" / "audit.jsonl"
 
 
 def _find_nexus_toml() -> Path | None:
@@ -186,12 +198,23 @@ def invalidate_ranking() -> None:
     _state["pagerank"] = None
 
 
-def check_rate_limit() -> None:
-    """Enforce rate limiting. Raises RuntimeError if exceeded."""
-    import time
+def check_kill_switch() -> None:
+    """Check for operator kill switch. Raises RuntimeError if KILL file exists."""
+    if _KILL_FILE.exists():
+        raise RuntimeError(
+            "Nexus killed by operator. Remove ~/.nexus/KILL to resume.\n"
+            f"Kill file: {_KILL_FILE}"
+        )
+
+
+def check_rate_limit(tool_name: str = "") -> None:
+    """Enforce rate limiting, kill switch, and token budget. Raises RuntimeError if exceeded."""
+    # Kill switch — immediate halt
+    check_kill_switch()
 
     now = time.time()
-    # Remove timestamps older than 60 seconds
+
+    # In-memory rate limit (fast path)
     while _call_timestamps and _call_timestamps[0] < now - 60:
         _call_timestamps.pop(0)
 
@@ -201,6 +224,89 @@ def check_rate_limit() -> None:
             "Wait a moment before making more requests."
         )
     _call_timestamps.append(now)
+
+    # Persistent rate limit (survives process restarts)
+    _check_rate_limit_persistent()
+
+    # Token budget check
+    if _session_tokens["input"] > MAX_SESSION_INPUT_TOKENS:
+        raise RuntimeError(
+            f"Session token budget exhausted: {_session_tokens['input']:,} estimated input tokens "
+            f"(cap: {MAX_SESSION_INPUT_TOKENS:,}). Start a new session."
+        )
+
+
+def _check_rate_limit_persistent() -> None:
+    """SQLite-backed rate limiter that survives process restarts."""
+    db = _state.get("db")
+    if db is None:
+        return  # No project active yet, skip persistent check
+
+    try:
+        now = time.time()
+        with db.connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS rate_limits (ts REAL NOT NULL)"
+            )
+            conn.execute("DELETE FROM rate_limits WHERE ts < ?", (now - 60,))
+            count = conn.execute("SELECT COUNT(*) as c FROM rate_limits").fetchone()["c"]
+            if count >= MAX_CALLS_PER_MINUTE:
+                raise RuntimeError(
+                    f"Persistent rate limit exceeded: {MAX_CALLS_PER_MINUTE} calls/minute "
+                    "(tracked across process restarts)."
+                )
+            conn.execute("INSERT INTO rate_limits (ts) VALUES (?)", (now,))
+    except RuntimeError:
+        raise
+    except Exception:
+        pass  # Don't block on DB errors
+
+
+def track_token_usage(chars_returned: int, tool_name: str = "") -> None:
+    """Track estimated token usage from tool results.
+
+    Estimates 1 token per 4 characters. Logs to audit trail.
+    """
+    est_tokens = chars_returned // 4
+    _session_tokens["input"] += est_tokens
+
+    # Log to audit trail
+    _audit_log(tool_name, est_tokens)
+
+    if _session_tokens["input"] > MAX_SESSION_INPUT_TOKENS * 0.9:
+        logger.warning(
+            "Token budget 90%% consumed: %d/%d estimated input tokens",
+            _session_tokens["input"], MAX_SESSION_INPUT_TOKENS,
+        )
+
+
+def get_token_usage() -> dict[str, int]:
+    """Return current session token usage stats."""
+    return {
+        "input_tokens_est": _session_tokens["input"],
+        "budget_remaining_est": max(0, MAX_SESSION_INPUT_TOKENS - _session_tokens["input"]),
+        "budget_total": MAX_SESSION_INPUT_TOKENS,
+    }
+
+
+def _audit_log(tool_name: str, tokens_est: int = 0, extra: dict | None = None) -> None:
+    """Append a structured JSON entry to ~/.nexus/audit.jsonl."""
+    try:
+        _AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": time.time(),
+            "tool": tool_name,
+            "tokens_est": tokens_est,
+            "session_total": _session_tokens["input"],
+        }
+        if _state.get("config"):
+            entry["project"] = _state["config"].name
+        if extra:
+            entry.update(extra)
+        with open(_AUDIT_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass  # Never block on audit logging
 
 
 def register_active_session(db: NexusDB, session_id: str, project: str) -> None:

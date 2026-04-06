@@ -19,26 +19,43 @@ class TestToolRegistration:
 
         tools = mcp._tool_manager._tools
         expected = {
+            # tools_index
             "nexus_scan",
             "nexus_read",
-            "nexus_start",
-            "nexus_retrieve",
             "nexus_symbols",
             "nexus_register_edit",
-            "nexus_remember",
+            "nexus_watch",
+            # tools_query
+            "nexus_start",
+            "nexus_retrieve",
             "nexus_stats",
-            "nexus_rename",
+            "nexus_deps",
             "nexus_analytics",
+            "nexus_summarize",
+            "nexus_feedback",
+            # tools_refactor
+            "nexus_rename",
             "nexus_enrich",
             "nexus_cross_project",
-            "nexus_deps",
+            "nexus_diff",
+            "nexus_docstring",
+            "nexus_remember",
+            # tools_integrations
+            "nexus_integrations",
+            "nexus_security",
+            "nexus_vcs",
+            "nexus_ci",
+            "nexus_packages",
+            "nexus_news",
+            "nexus_nlp",
+            "nexus_ext_analytics",
         }
         assert set(tools.keys()) == expected
 
     def test_tool_count(self):
         from nexus.server.mcp import mcp
 
-        assert len(mcp._tool_manager._tools) == 13
+        assert len(mcp._tool_manager._tools) == 26
 
 
 class TestNexusScan:
