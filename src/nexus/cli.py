@@ -44,9 +44,14 @@ def main() -> None:
                      choices=["newer_wins", "source_wins", "skip_existing"],
                      help="Merge strategy (default: newer_wins)")
 
+    # nexus hook  (called by Claude Code PostToolUse hook — reads JSON from stdin)
+    sub.add_parser("hook", help="Process a Claude Code PostToolUse hook event (reads JSON from stdin)")
+
     args = parser.parse_args()
 
-    if args.command == "serve":
+    if args.command == "hook":
+        _cmd_hook()
+    elif args.command == "serve":
         _cmd_serve()
     elif args.command == "scan":
         _cmd_scan(args)
@@ -172,6 +177,57 @@ def _cmd_import(args: argparse.Namespace) -> None:
     print(f"Decisions: {counts['decisions']}")
     print(f"Actions: {counts['actions']}")
     print(f"Queries: {counts['queries']}")
+
+
+def _cmd_hook() -> None:
+    """Process a Claude Code PostToolUse hook event.
+
+    Claude Code passes the hook payload as JSON on stdin. We extract the edited
+    file path and incrementally reindex the project that contains it.
+
+    Only triggers for Write, Edit, and MultiEdit tools. Exits silently (code 0)
+    for anything else so the hook never blocks Claude.
+    """
+    import json
+
+    try:
+        data = json.loads(sys.stdin.read())
+    except Exception:
+        sys.exit(0)
+
+    tool_name = data.get("tool_name", "")
+    if tool_name not in ("Write", "Edit", "MultiEdit"):
+        sys.exit(0)
+
+    file_path_str = data.get("tool_input", {}).get("file_path", "")
+    if not file_path_str:
+        sys.exit(0)
+
+    file_path = Path(file_path_str).resolve()
+
+    # Walk up from the edited file to find the nearest project root (.nexus dir)
+    project_root: Path | None = None
+    for candidate in [file_path.parent, *file_path.parent.parents]:
+        if (candidate / ".nexus").is_dir():
+            project_root = candidate
+            break
+
+    if project_root is None:
+        sys.exit(0)
+
+    try:
+        from nexus.index.pipeline import index_project
+        from nexus.store.db import NexusDB
+        from nexus.util.config import ProjectConfig
+
+        config = ProjectConfig(name=project_root.name, root=project_root)
+        db = NexusDB(config.db_path)
+        # force=False: only reindexes files whose SHA-256 changed
+        index_project(config, db, force=False)
+    except Exception:
+        pass  # Never block Claude due to indexing errors
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":

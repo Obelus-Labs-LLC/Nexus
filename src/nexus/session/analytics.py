@@ -62,6 +62,94 @@ def log_query_result(
         )
 
 
+def log_feedback(
+    db: NexusDB,
+    session_id: str,
+    original_query: str,
+    original_confidence: str,
+    manual_files: list[str],
+) -> None:
+    """Record that a user manually found files after a low-confidence query.
+
+    This is the core signal for the confidence feedback loop: if Claude
+    searches manually after a low-confidence result and reads specific files,
+    those files should have ranked higher. The tuner uses this data.
+    """
+    try:
+        with db.connect() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS session_feedback (
+                    id              INTEGER PRIMARY KEY,
+                    session_id      TEXT NOT NULL,
+                    original_query  TEXT NOT NULL,
+                    original_confidence TEXT,
+                    manual_files    TEXT,
+                    timestamp       REAL NOT NULL
+                )"""
+            )
+            conn.execute(
+                """INSERT INTO session_feedback
+                   (session_id, original_query, original_confidence, manual_files, timestamp)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (session_id, original_query, original_confidence,
+                 ",".join(manual_files), time.time()),
+            )
+    except Exception:
+        pass  # Feedback is best-effort
+
+
+def detect_and_log_feedback(
+    db: NexusDB,
+    session_id: str,
+    current_query: str,
+) -> None:
+    """Auto-detect feedback signal: if previous query was low-confidence and user
+    is now running a related query (retry pattern), log it as a feedback event.
+
+    Called at the start of each nexus_retrieve.
+    """
+    try:
+        with db.connect() as conn:
+            # Find most recent query for this session
+            prev = conn.execute(
+                """SELECT query, result_files, confidence, timestamp
+                   FROM query_history
+                   WHERE session_id = ?
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (session_id,),
+            ).fetchone()
+
+        if not prev:
+            return
+
+        # Only act on low/medium confidence previous queries
+        if prev["confidence"] == "high":
+            return
+
+        # Check if this looks like a retry (query similarity > 30%)
+        prev_tokens = set(prev["query"].lower().split())
+        curr_tokens = set(current_query.lower().split())
+        if not prev_tokens or not curr_tokens:
+            return
+
+        overlap = len(prev_tokens & curr_tokens) / max(len(prev_tokens), len(curr_tokens))
+        if overlap < 0.3:
+            return
+
+        # It's a retry — log feedback with the previous result files as "missed"
+        prev_files = (prev["result_files"] or "").split(",") if prev["result_files"] else []
+        if prev_files:
+            log_feedback(
+                db=db,
+                session_id=session_id,
+                original_query=prev["query"],
+                original_confidence=prev["confidence"],
+                manual_files=prev_files,
+            )
+    except Exception:
+        pass  # Feedback detection is best-effort
+
+
 def get_analytics_report(db: NexusDB, days: int = 30) -> AnalyticsReport:
     """Generate an analytics report for the project."""
     report = AnalyticsReport()

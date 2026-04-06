@@ -9,10 +9,12 @@ from pathlib import Path
 from nexus.server.state import (
     activate_project,
     check_rate_limit,
+    check_session_conflicts,
     get_config,
     get_db,
     get_tracker,
     invalidate_ranking,
+    mark_session_edits,
     validate_path,
 )
 
@@ -293,9 +295,121 @@ def register(mcp):
 
         invalidate_ranking()
 
+        # Update session's edited files list + check for conflicts
+        mark_session_edits(db, tracker.session_id, file_list)
+        conflicts = check_session_conflicts(db, tracker.session_id, file_list)
+
         stats = db.get_stats()
         logger.info("Registered edits: %d files, %d reindexed", len(file_list), reindexed)
+
+        result_lines = [
+            f"Registered edits: {len(file_list)} files, {reindexed} reindexed",
+            f"Index: {stats['symbols']} symbols, {stats['edges']} edges",
+        ]
+        for warn in conflicts:
+            result_lines.append(f"⚠ Conflict: {warn}")
+
+        return "\n".join(result_lines)
+
+    @mcp.tool()
+    def nexus_watch(
+        action: str = "start",
+    ) -> str:
+        """Start or stop automatic file watching for the active project.
+
+        When running, detects saved files and re-indexes them automatically —
+        no need to call nexus_register_edit manually after each save.
+
+        Requires 'watchdog' for efficient event-driven watching (pip install watchdog).
+        Falls back to polling every 3 seconds if watchdog is not installed.
+
+        Args:
+            action: "start" to begin watching, "stop" to stop, "status" to check.
+        """
+        check_rate_limit()
+        from nexus.watch import is_running, start_watcher, stop_watcher
+
+        if action == "status":
+            if is_running():
+                return "Watcher is running. Files are being monitored automatically."
+            return "Watcher is not running. Use nexus_watch(action='start') to begin."
+
+        if action == "stop":
+            if not is_running():
+                return "Watcher is not running."
+            stop_watcher()
+            return "Watcher stopped."
+
+        # action == "start"
+        if is_running():
+            return "Watcher is already running. Use nexus_watch(action='stop') to restart."
+
+        db = get_db()
+        config = get_config()
+
+        def _on_change(changed_files: list[str]) -> None:
+            """Callback invoked by the watcher when files change."""
+            reindexed = 0
+            for rel_path in changed_files:
+                try:
+                    validate_path(rel_path, config)
+                except ValueError:
+                    continue
+
+                abs_path = config.root / rel_path
+                if not abs_path.exists():
+                    continue
+
+                file_info = db.get_file_by_path(rel_path)
+                if not file_info:
+                    continue
+
+                from nexus.index.parser import parse_file
+                from nexus.index.graph import build_intra_file_edges
+                from nexus.util.hashing import sha256_file
+
+                file_id = file_info["id"]
+                db.clear_file(file_id)
+
+                sha = sha256_file(abs_path)
+                stat = abs_path.stat()
+                db.upsert_file(
+                    path=rel_path,
+                    sha256=sha,
+                    language=file_info["language"],
+                    line_count=sum(1 for _ in open(abs_path, errors="replace")),
+                    byte_size=stat.st_size,
+                    timestamp=time.time(),
+                )
+
+                if file_info["language"]:
+                    parsed = parse_file(abs_path, file_info["language"])
+                    for sym in parsed.symbols:
+                        db.insert_symbol(
+                            file_id=file_id,
+                            name=sym.name,
+                            qualified=sym.qualified,
+                            kind=sym.kind,
+                            line_start=sym.line_start,
+                            line_end=sym.line_end,
+                            signature=sym.signature,
+                            docstring=sym.docstring,
+                            body_text=sym.body_text,
+                            visibility=sym.visibility,
+                            decorators=sym.decorators,
+                        )
+                    build_intra_file_edges(db, file_id, parsed.symbols)
+                reindexed += 1
+
+            if reindexed:
+                invalidate_ranking()
+                logger.info("Watch: auto-indexed %d files", reindexed)
+
+        mode = start_watcher(config.root, config.extensions, _on_change)
         return (
-            f"Registered edits: {len(file_list)} files, {reindexed} reindexed\n"
-            f"Index: {stats['symbols']} symbols, {stats['edges']} edges"
+            f"Watcher started ({mode}) on {config.name}.\n"
+            f"Monitoring: {', '.join(sorted(config.extensions))}\n"
+            "Files will be auto-indexed when saved. Use nexus_watch(action='stop') to stop.\n"
+            + ("" if mode == "watchdog" else
+               "Tip: pip install watchdog for event-driven watching (more efficient than polling).")
         )

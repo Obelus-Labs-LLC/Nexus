@@ -60,6 +60,7 @@ _state: dict[str, Any] = {
     "bm25": None,
     "pagerank": None,
     "tracker": None,
+    "rrf_weights": None,  # Tuned weights loaded at activation
 }
 
 
@@ -134,6 +135,24 @@ def activate_project(
     return config, db
 
 
+def get_rrf_weights() -> dict[str, float] | None:
+    """Get the currently loaded tuned RRF weights, or None for defaults."""
+    return _state.get("rrf_weights")
+
+
+def reload_tuned_weights(db: NexusDB) -> None:
+    """Reload tuned BM25 + RRF weights from the database and apply them."""
+    from nexus.rank.tuner import load_tuning
+    from nexus.rank.bm25 import set_boosts
+
+    tuned_boosts, tuned_rrf = load_tuning(db)
+    set_boosts(tuned_boosts)
+    _state["rrf_weights"] = tuned_rrf
+    # Invalidate BM25 so it rebuilds with new boosts
+    _state["bm25"] = None
+    logger.debug("Reloaded tuned weights: boosts=%s rrf=%s", tuned_boosts, tuned_rrf)
+
+
 def ensure_ranking(db: NexusDB) -> tuple[NexusBM25, NexusPageRank]:
     """Build ranking indices if not already built. Applies tuned weights if available."""
     bm25 = _state.get("bm25")
@@ -143,13 +162,14 @@ def ensure_ranking(db: NexusDB) -> tuple[NexusBM25, NexusPageRank]:
         from nexus.rank.tuner import load_tuning
         from nexus.rank.bm25 import set_boosts
 
-        tuned_boosts, _tuned_rrf = load_tuning(db)
+        tuned_boosts, tuned_rrf = load_tuning(db)
         set_boosts(tuned_boosts)
+        _state["rrf_weights"] = tuned_rrf
 
         bm25 = NexusBM25()
         bm25.build(db)
         _state["bm25"] = bm25
-        logger.debug("BM25 index built")
+        logger.debug("BM25 index built with boosts=%s", tuned_boosts)
 
     if pr is None or not pr.is_built:
         pr = NexusPageRank()
@@ -181,6 +201,91 @@ def check_rate_limit() -> None:
             "Wait a moment before making more requests."
         )
     _call_timestamps.append(now)
+
+
+def register_active_session(db: NexusDB, session_id: str, project: str) -> None:
+    """Record this session as active. Cleans up stale sessions (>4 hours)."""
+    import time as _time
+
+    try:
+        with db.connect() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS active_sessions (
+                    session_id   TEXT PRIMARY KEY,
+                    project      TEXT NOT NULL,
+                    started_at   REAL NOT NULL,
+                    last_seen    REAL NOT NULL,
+                    edited_files TEXT DEFAULT ''
+                )"""
+            )
+            now = _time.time()
+            # Clean up sessions older than 4 hours
+            conn.execute(
+                "DELETE FROM active_sessions WHERE last_seen < ?",
+                (now - 4 * 3600,),
+            )
+            conn.execute(
+                """INSERT OR REPLACE INTO active_sessions
+                   (session_id, project, started_at, last_seen, edited_files)
+                   VALUES (?, ?, COALESCE((SELECT started_at FROM active_sessions WHERE session_id = ?), ?), ?, '')""",
+                (session_id, project, session_id, now, now),
+            )
+    except Exception:
+        pass
+
+
+def check_session_conflicts(db: NexusDB, session_id: str, edited_files: list[str]) -> list[str]:
+    """Return warning messages if other active sessions have recently edited these files."""
+    import time as _time
+
+    warnings = []
+    try:
+        with db.connect() as conn:
+            table_check = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='active_sessions'"
+            ).fetchone()
+            if not table_check:
+                return []
+
+            others = conn.execute(
+                "SELECT session_id, edited_files FROM active_sessions "
+                "WHERE session_id != ? AND last_seen > ?",
+                (session_id, _time.time() - 3600),
+            ).fetchall()
+
+        for other in others:
+            other_files = set((other["edited_files"] or "").split(","))
+            overlap = set(edited_files) & other_files - {""}
+            if overlap:
+                warnings.append(
+                    f"Session {other['session_id'][:8]} also edited: {', '.join(sorted(overlap))}"
+                )
+    except Exception:
+        pass
+    return warnings
+
+
+def mark_session_edits(db: NexusDB, session_id: str, edited_files: list[str]) -> None:
+    """Update the edited_files list for this session."""
+    import time as _time
+
+    try:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT edited_files FROM active_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row:
+                existing = set((row["edited_files"] or "").split(",")) - {""}
+                existing.update(edited_files)
+                # Keep at most 50 files
+                merged = ",".join(list(existing)[:50])
+                conn.execute(
+                    "UPDATE active_sessions SET edited_files = ?, last_seen = ? WHERE session_id = ?",
+                    (merged, _time.time(), session_id),
+                )
+    except Exception:
+        pass
 
 
 def validate_path(path: str, config: ProjectConfig) -> Path:

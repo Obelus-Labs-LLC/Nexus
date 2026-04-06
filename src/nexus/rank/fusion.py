@@ -15,12 +15,16 @@ from typing import Any
 
 _RRF_K = 60  # Standard RRF constant
 
+# Default RRF signal weights (overridden by auto-tuner)
+_DEFAULT_RRF_WEIGHTS = {"bm25": 1.0, "pagerank": 1.0, "recency": 1.0}
+
 
 def fuse_rankings(
     bm25_results: list[dict[str, Any]],
     pagerank_results: list[dict[str, Any]],
     recency_results: list[dict[str, Any]] | None = None,
     top_k: int = 20,
+    rrf_weights: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Combine multiple ranked lists using Reciprocal Rank Fusion.
 
@@ -29,6 +33,11 @@ def fuse_rankings(
 
     Returns merged results sorted by fused score, with per-signal breakdowns.
     """
+    w = rrf_weights or _DEFAULT_RRF_WEIGHTS
+    w_bm25 = w.get("bm25", 1.0)
+    w_pr = w.get("pagerank", 1.0)
+    w_recency = w.get("recency", 1.0)
+
     scores: dict[int, dict[str, Any]] = {}
 
     # BM25 signal
@@ -45,7 +54,7 @@ def fuse_rankings(
                 "bm25_score": 0.0,
                 "pr_score": 0.0,
             }
-        scores[fid]["rrf_score"] += 1.0 / (_RRF_K + item["rank"])
+        scores[fid]["rrf_score"] += w_bm25 / (_RRF_K + item["rank"])
         scores[fid]["bm25_rank"] = item["rank"]
         scores[fid]["bm25_score"] = item.get("score", 0.0)
 
@@ -63,11 +72,11 @@ def fuse_rankings(
                 "bm25_score": 0.0,
                 "pr_score": 0.0,
             }
-        scores[fid]["rrf_score"] += 1.0 / (_RRF_K + item["rank"])
+        scores[fid]["rrf_score"] += w_pr / (_RRF_K + item["rank"])
         scores[fid]["pr_rank"] = item["rank"]
         scores[fid]["pr_score"] = item.get("score", 0.0)
 
-    # Recency signal (optional — Phase 3)
+    # Recency signal (optional)
     if recency_results:
         for item in recency_results:
             fid = item["file_id"]
@@ -82,7 +91,7 @@ def fuse_rankings(
                     "bm25_score": 0.0,
                     "pr_score": 0.0,
                 }
-            scores[fid]["rrf_score"] += 1.0 / (_RRF_K + item["rank"])
+            scores[fid]["rrf_score"] += w_recency / (_RRF_K + item["rank"])
             scores[fid]["recency_rank"] = item["rank"]
 
     # Sort by fused score

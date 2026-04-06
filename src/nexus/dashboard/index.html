@@ -3,497 +3,598 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Nexus — Project Observatory</title>
+<title>Nexus Dashboard</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
 <style>
-  :root {
-    --bg: #0a0a0f;
-    --surface: #12121a;
-    --surface2: #1a1a25;
-    --border: #2a2a3a;
-    --text: #e0e0e8;
-    --text-dim: #8888a0;
-    --accent: #6366f1;
-    --accent2: #818cf8;
-    --green: #34d399;
-    --amber: #fbbf24;
-    --red: #f87171;
-    --cyan: #22d3ee;
-  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #c9d1d9; height: 100vh; overflow: hidden; }
 
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  #app { display: grid; grid-template-rows: 48px 1fr; height: 100vh; }
 
-  body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-  }
-
-  .header {
-    padding: 24px 32px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .header h1 {
-    font-size: 20px;
-    font-weight: 600;
-    letter-spacing: -0.5px;
-  }
-
-  .header h1 span { color: var(--accent); }
-
-  .header-stats {
-    display: flex;
-    gap: 24px;
-    font-size: 13px;
-    color: var(--text-dim);
-  }
-
-  .header-stats strong { color: var(--text); font-weight: 500; }
-
-  .main { padding: 24px 32px; }
-
-  /* Summary row */
-  .summary-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 12px;
-    margin-bottom: 24px;
-  }
-
-  .stat-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-  }
-
-  .stat-card .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
-  .stat-card .value { font-size: 28px; font-weight: 600; margin-top: 4px; }
-  .stat-card .sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
-
-  /* Cluster section */
-  .section-title {
-    font-size: 14px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: var(--text-dim);
-    margin: 24px 0 12px;
+  /* Topbar */
+  #topbar {
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
     display: flex;
     align-items: center;
-    gap: 8px;
+    padding: 0 16px;
+    gap: 16px;
   }
+  #topbar h1 { font-size: 16px; font-weight: 600; color: #58a6ff; }
+  #topbar .subtitle { font-size: 12px; color: #8b949e; }
+  #topbar .spacer { flex: 1; }
+  #cluster-filter { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 10px; border-radius: 6px; font-size: 13px; }
+  #refresh-btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+  #refresh-btn:hover { background: #30363d; }
+  #status-dot { width: 8px; height: 8px; border-radius: 50%; background: #3fb950; }
 
-  .section-title::after {
-    content: '';
-    flex: 1;
-    height: 1px;
-    background: var(--border);
-  }
+  /* Main layout */
+  #main { display: grid; grid-template-columns: 1fr 320px; overflow: hidden; }
 
-  /* Project grid */
-  .project-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    gap: 12px;
-    margin-bottom: 16px;
-  }
+  /* Graph panel */
+  #graph-panel { position: relative; overflow: hidden; }
+  #graph-svg { width: 100%; height: 100%; }
 
-  .project-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
+  /* Tooltip */
+  #tooltip {
+    position: absolute;
+    background: #161b22;
+    border: 1px solid #30363d;
     border-radius: 8px;
-    padding: 16px;
-    cursor: pointer;
-    transition: border-color 0.15s, transform 0.1s;
-  }
-
-  .project-card:hover {
-    border-color: var(--accent);
-    transform: translateY(-1px);
-  }
-
-  .project-card.expanded { border-color: var(--accent); }
-
-  .card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 8px;
-  }
-
-  .card-name {
-    font-size: 16px;
-    font-weight: 600;
-  }
-
-  .card-cluster {
-    font-size: 10px;
-    padding: 2px 8px;
-    border-radius: 10px;
-    background: var(--surface2);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .card-langs {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 10px;
-  }
-
-  .lang-tag {
-    font-size: 10px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-weight: 500;
-  }
-
-  .lang-python { background: #1e3a5f; color: #60a5fa; }
-  .lang-rust { background: #3d1f0f; color: #fb923c; }
-  .lang-typescript { background: #1a2e4a; color: #38bdf8; }
-  .lang-javascript { background: #3d3a0f; color: #facc15; }
-  .lang-c { background: #1f2d1f; color: #86efac; }
-  .lang-go { background: #1a3333; color: #5eead4; }
-  .lang-java { background: #3d1f1f; color: #fca5a5; }
-
-  .card-metrics {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 8px;
+    padding: 10px 14px;
     font-size: 12px;
+    pointer-events: none;
+    display: none;
+    max-width: 260px;
+    z-index: 100;
   }
+  #tooltip .t-name { font-size: 14px; font-weight: 600; color: #58a6ff; margin-bottom: 6px; }
+  #tooltip .t-row { display: flex; justify-content: space-between; gap: 12px; margin: 2px 0; }
+  #tooltip .t-label { color: #8b949e; }
+  #tooltip .t-value { color: #e6edf3; }
 
-  .metric { text-align: center; }
-  .metric .num { font-size: 16px; font-weight: 600; color: var(--text); }
-  .metric .lbl { font-size: 10px; color: var(--text-dim); }
-
-  /* Complexity bar */
-  .complexity-bar {
-    margin-top: 10px;
-    height: 3px;
-    background: var(--surface2);
-    border-radius: 2px;
+  /* Sidebar */
+  #sidebar {
+    background: #161b22;
+    border-left: 1px solid #30363d;
+    display: flex;
+    flex-direction: column;
     overflow: hidden;
   }
 
-  .complexity-fill {
-    height: 100%;
-    border-radius: 2px;
-    transition: width 0.3s;
-  }
+  /* Tabs */
+  #tabs { display: flex; border-bottom: 1px solid #30363d; }
+  .tab { flex: 1; padding: 10px; text-align: center; font-size: 12px; cursor: pointer; color: #8b949e; border-bottom: 2px solid transparent; }
+  .tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
 
-  /* Expanded details */
-  .card-details {
-    display: none;
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-    font-size: 12px;
-  }
+  /* Panel content */
+  #panel-content { flex: 1; overflow-y: auto; padding: 12px; }
 
-  .card-details.show { display: block; }
-
-  .detail-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-  }
-
-  .detail-item { color: var(--text-dim); }
-  .detail-item strong { color: var(--text); font-weight: 500; }
-
-  .top-symbols {
-    margin-top: 8px;
-    font-size: 11px;
-  }
-
-  .top-symbols .sym {
-    display: flex;
-    justify-content: space-between;
-    padding: 2px 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .sym-name { color: var(--accent2); font-family: 'JetBrains Mono', monospace; }
-  .sym-edges { color: var(--text-dim); }
-
-  /* Cluster connections */
-  .cluster-connections {
-    background: var(--surface);
-    border: 1px solid var(--border);
+  /* Project list */
+  .proj-card {
+    background: #21262d;
+    border: 1px solid #30363d;
     border-radius: 8px;
-    padding: 16px;
-    margin-bottom: 16px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: border-color 0.15s;
   }
+  .proj-card:hover, .proj-card.selected { border-color: #58a6ff; }
+  .proj-card .pc-name { font-size: 13px; font-weight: 600; color: #e6edf3; }
+  .proj-card .pc-meta { font-size: 11px; color: #8b949e; margin-top: 3px; }
+  .proj-card .pc-bar { height: 3px; background: #30363d; border-radius: 2px; margin-top: 8px; }
+  .proj-card .pc-bar-fill { height: 100%; background: #58a6ff; border-radius: 2px; transition: width 0.3s; }
+  .proj-card.offline { opacity: 0.5; }
 
-  .connection {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 0;
-    font-size: 13px;
-  }
+  /* Stats panel */
+  .stat-section { margin-bottom: 16px; }
+  .stat-section h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #8b949e; margin-bottom: 8px; }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat-box { background: #21262d; border-radius: 6px; padding: 10px; }
+  .stat-box .sb-val { font-size: 20px; font-weight: 700; color: #58a6ff; }
+  .stat-box .sb-label { font-size: 11px; color: #8b949e; margin-top: 2px; }
 
-  .conn-arrow { color: var(--accent); font-size: 14px; }
-  .conn-count {
-    font-size: 11px;
-    padding: 1px 6px;
-    background: var(--surface2);
-    border-radius: 10px;
-    color: var(--text-dim);
-  }
+  /* Chart container */
+  .chart-box { background: #21262d; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+  .chart-box h4 { font-size: 11px; color: #8b949e; margin-bottom: 8px; }
 
-  .not-indexed {
-    color: var(--text-dim);
-    font-style: italic;
-    font-size: 12px;
-    padding: 8px;
-    text-align: center;
-  }
+  /* Bar chart row */
+  .bar-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 11px; }
+  .bar-row .br-label { width: 80px; text-align: right; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-row .br-track { flex: 1; height: 10px; background: #30363d; border-radius: 3px; }
+  .bar-row .br-fill { height: 100%; border-radius: 3px; }
+  .bar-row .br-val { width: 40px; color: #8b949e; }
+
+  /* Legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; font-size: 11px; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
 
   /* Loading */
-  .loading {
-    text-align: center;
-    padding: 48px;
-    color: var(--text-dim);
-  }
+  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: #0d1117; z-index: 200; }
+  #loading .spinner { width: 32px; height: 32px; border: 3px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-  .loading { animation: pulse 1.5s infinite; }
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
 </style>
 </head>
 <body>
-<div class="header">
-  <h1><span>N</span>exus Observatory</h1>
-  <div class="header-stats" id="headerStats"></div>
-</div>
-<div class="main" id="app">
-  <div class="loading">Loading project data...</div>
+<div id="app">
+  <div id="topbar">
+    <div id="status-dot"></div>
+    <h1>Nexus</h1>
+    <span class="subtitle">Codebase Graph Engine</span>
+    <div class="spacer"></div>
+    <select id="cluster-filter"><option value="all">All Clusters</option></select>
+    <button id="refresh-btn">&#8635; Refresh</button>
+  </div>
+  <div id="main">
+    <div id="graph-panel">
+      <div id="loading"><div class="spinner"></div></div>
+      <svg id="graph-svg"></svg>
+      <div id="tooltip">
+        <div class="t-name" id="tt-name"></div>
+        <div class="t-row"><span class="t-label">Files</span><span class="t-value" id="tt-files"></span></div>
+        <div class="t-row"><span class="t-label">Symbols</span><span class="t-value" id="tt-symbols"></span></div>
+        <div class="t-row"><span class="t-label">Lines</span><span class="t-value" id="tt-lines"></span></div>
+        <div class="t-row"><span class="t-label">Cluster</span><span class="t-value" id="tt-cluster"></span></div>
+        <div class="t-row"><span class="t-label">Languages</span><span class="t-value" id="tt-langs"></span></div>
+      </div>
+    </div>
+    <div id="sidebar">
+      <div id="tabs">
+        <div class="tab active" data-tab="projects">Projects</div>
+        <div class="tab" data-tab="stats">Stats</div>
+        <div class="tab" data-tab="tuning">Tuning</div>
+      </div>
+      <div id="panel-content"></div>
+    </div>
+  </div>
 </div>
 
 <script>
-const LANG_COLORS = {
-  python: 'lang-python', rust: 'lang-rust', typescript: 'lang-typescript',
-  javascript: 'lang-javascript', c: 'lang-c', go: 'lang-go', java: 'lang-java',
-};
+// ─── State ────────────────────────────────────────────────────────────────────
+let projects = {};
+let clusterEdges = {};
+let tuningData = {};
+let selectedProject = null;
+let currentTab = 'projects';
+let simulation = null;
 
-const COMPLEXITY_COLORS = ['#34d399', '#6366f1', '#fbbf24', '#fb923c', '#f87171'];
-
-function fmt(n) {
-  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
-  return n.toString();
+// ─── Cluster color palette ────────────────────────────────────────────────────
+const CLUSTER_COLORS = [
+  '#58a6ff','#3fb950','#f78166','#d2a8ff','#ffa657',
+  '#79c0ff','#56d364','#ff7b72','#bc8cff','#ffb77c',
+];
+const clusterColorMap = {};
+function clusterColor(name) {
+  if (!name) return '#484f58';
+  if (!clusterColorMap[name]) {
+    const keys = Object.keys(clusterColorMap);
+    clusterColorMap[name] = CLUSTER_COLORS[keys.length % CLUSTER_COLORS.length];
+  }
+  return clusterColorMap[name];
 }
 
-function fmtBytes(b) {
-  if (b >= 1e9) return (b/1e9).toFixed(1) + ' GB';
-  if (b >= 1e6) return (b/1e6).toFixed(1) + ' MB';
-  if (b >= 1e3) return (b/1e3).toFixed(1) + ' KB';
-  return b + ' B';
-}
-
-function complexityScore(p) {
-  if (!p.indexed) return 0;
-  // Weighted complexity: symbols * edge density * language count
-  const edgeDensity = p.symbols > 0 ? p.edges / p.symbols : 0;
-  const langCount = Object.keys(p.language_breakdown || {}).length;
-  return Math.log10(Math.max(1, p.symbols)) * (1 + edgeDensity) * Math.max(1, langCount);
-}
-
-function complexityColor(score, maxScore) {
-  const ratio = maxScore > 0 ? score / maxScore : 0;
-  const idx = Math.min(4, Math.floor(ratio * 5));
-  return COMPLEXITY_COLORS[idx];
-}
-
-async function load() {
-  let projRes, clusterRes;
+// ─── Fetch ────────────────────────────────────────────────────────────────────
+async function fetchAll() {
+  document.getElementById('loading').style.display = 'flex';
   try {
-    [projRes, clusterRes] = await Promise.all([
+    const [p, c, t] = await Promise.all([
       fetch('/api/projects').then(r => r.json()),
       fetch('/api/clusters').then(r => r.json()),
+      fetch('/api/tuning').then(r => r.json()).catch(() => ({})),
     ]);
+    projects = p;
+    clusterEdges = c;
+    tuningData = t;
+
+    // Populate cluster filter
+    const clusters = [...new Set(Object.values(projects).map(p => p.cluster).filter(Boolean))];
+    const select = document.getElementById('cluster-filter');
+    const current = select.value;
+    select.innerHTML = '<option value="all">All Clusters</option>' +
+      clusters.map(c => `<option value="${c}">${c}</option>`).join('');
+    if (clusters.includes(current)) select.value = current;
+
+    render();
   } catch(e) {
-    document.getElementById('app').innerHTML = `<div class="loading" style="animation:none;color:var(--red)">API error: ${e.message}</div>`;
-    return;
+    console.error('Fetch error:', e);
+    document.getElementById('loading').style.display = 'none';
   }
+}
 
-  // Handle both dict and list responses
-  const projects = Array.isArray(projRes) ? projRes : Object.values(projRes);
-  const indexed = projects.filter(p => p.indexed);
+// ─── D3 Force Graph ───────────────────────────────────────────────────────────
+function buildGraph(filterCluster) {
+  const svg = d3.select('#graph-svg');
+  svg.selectAll('*').remove();
 
-  // Header stats
-  // Ensure all indexed projects have required fields with defaults
-  indexed.forEach(p => {
-    p.files = p.files || 0;
-    p.symbols = p.symbols || 0;
-    p.edges = p.edges || 0;
-    p.total_lines = p.total_lines || 0;
-    p.total_bytes = p.total_bytes || 0;
-    p.language_breakdown = p.language_breakdown || {};
-    p.symbol_kinds = p.symbol_kinds || {};
-    p.edge_kinds = p.edge_kinds || {};
-    p.top_symbols = p.top_symbols || [];
-    p.recent_sessions_7d = p.recent_sessions_7d || 0;
-    p.active_decisions = p.active_decisions || 0;
-    p.unresolved_imports = p.unresolved_imports || 0;
-  });
+  const panel = document.getElementById('graph-panel');
+  const W = panel.clientWidth, H = panel.clientHeight;
 
-  const totalFiles = indexed.reduce((s, p) => s + p.files, 0);
-  const totalSymbols = indexed.reduce((s, p) => s + p.symbols, 0);
-  const totalEdges = indexed.reduce((s, p) => s + p.edges, 0);
-  const totalLines = indexed.reduce((s, p) => s + p.total_lines, 0);
-  const totalBytes = indexed.reduce((s, p) => s + p.total_bytes, 0);
+  // Filter projects
+  const visibleProjects = Object.values(projects).filter(p =>
+    filterCluster === 'all' || p.cluster === filterCluster
+  );
 
-  document.getElementById('headerStats').innerHTML = `
-    <span><strong>${indexed.length}</strong> / ${projects.length} projects indexed</span>
-    <span><strong>${fmt(totalFiles)}</strong> files</span>
-    <span><strong>${fmt(totalSymbols)}</strong> symbols</span>
-    <span><strong>${fmt(totalEdges)}</strong> edges</span>
-    <span><strong>${fmt(totalLines)}</strong> lines</span>
-    <span><strong>${fmtBytes(totalBytes)}</strong></span>
-  `;
+  if (!visibleProjects.length) return;
 
-  // Group by cluster
-  const clusters = {};
-  const standalone = [];
-  projects.forEach(p => {
-    if (p.cluster) {
-      (clusters[p.cluster] = clusters[p.cluster] || []).push(p);
-    } else {
-      standalone.push(p);
-    }
-  });
+  // Build nodes
+  const nodes = visibleProjects.map(p => ({
+    id: p.name,
+    ...p,
+    radius: p.indexed ? Math.max(12, Math.min(35, Math.sqrt((p.files || 0) / 5) + 12)) : 10,
+  }));
 
-  const maxComplexity = Math.max(...projects.map(complexityScore), 1);
-
-  let html = '';
-
-  // Summary cards
-  html += '<div class="summary-row">';
-  html += `<div class="stat-card"><div class="label">Total Projects</div><div class="value">${projects.length}</div><div class="sub">${indexed.length} indexed</div></div>`;
-  html += `<div class="stat-card"><div class="label">Total Code</div><div class="value">${fmt(totalLines)}</div><div class="sub">lines across all projects</div></div>`;
-  html += `<div class="stat-card"><div class="label">Symbols</div><div class="value">${fmt(totalSymbols)}</div><div class="sub">functions, classes, methods</div></div>`;
-  html += `<div class="stat-card"><div class="label">Edges</div><div class="value">${fmt(totalEdges)}</div><div class="sub">imports, contains, references</div></div>`;
-  html += `<div class="stat-card"><div class="label">Storage</div><div class="value">${fmtBytes(totalBytes)}</div><div class="sub">source code indexed</div></div>`;
-  html += '</div>';
-
-  // Render clusters
-  for (const [cluster, cProjects] of Object.entries(clusters)) {
-    html += `<div class="section-title">${cluster} cluster</div>`;
-
-    // Cross-project connections
-    const edges = clusterRes[cluster] || [];
-    if (edges.length > 0) {
-      html += '<div class="cluster-connections">';
-      // Deduplicate edges
-      const seen = new Set();
-      edges.forEach(e => {
-        const key = [e.source, e.target].sort().join('↔');
-        if (!seen.has(key)) {
-          seen.add(key);
-          html += `<div class="connection">
-            <span>${e.source}</span>
-            <span class="conn-arrow">↔</span>
-            <span>${e.target}</span>
-            <span class="conn-count">${e.count} edges</span>
-          </div>`;
-        }
-      });
-      html += '</div>';
-    }
-
-    html += '<div class="project-grid">';
-    cProjects.forEach(p => { html += renderCard(p, maxComplexity); });
-    html += '</div>';
-  }
-
-  // Standalone projects
-  if (standalone.length) {
-    html += '<div class="section-title">Standalone</div>';
-    html += '<div class="project-grid">';
-    standalone.forEach(p => { html += renderCard(p, maxComplexity); });
-    html += '</div>';
-  }
-
-  document.getElementById('app').innerHTML = html;
-
-  // Click handlers
-  document.querySelectorAll('.project-card').forEach(card => {
-    card.addEventListener('click', () => {
-      const details = card.querySelector('.card-details');
-      if (details) {
-        details.classList.toggle('show');
-        card.classList.toggle('expanded');
+  // Build links from cluster edges
+  const links = [];
+  const nodeIds = new Set(nodes.map(n => n.id));
+  Object.values(clusterEdges).forEach(edgeList => {
+    edgeList.forEach(e => {
+      if (nodeIds.has(e.source) && nodeIds.has(e.target)) {
+        links.push({ source: e.source, target: e.target, count: e.count });
       }
     });
   });
+
+  svg.attr('viewBox', `0 0 ${W} ${H}`);
+
+  // Defs: arrow marker
+  const defs = svg.append('defs');
+  defs.append('marker')
+    .attr('id', 'arrow')
+    .attr('viewBox', '0 -4 8 8')
+    .attr('refX', 8).attr('refY', 0)
+    .attr('markerWidth', 6).attr('markerHeight', 6)
+    .attr('orient', 'auto')
+    .append('path').attr('d', 'M0,-4L8,0L0,4').attr('fill', '#484f58');
+
+  const g = svg.append('g');
+
+  // Zoom
+  svg.call(d3.zoom().scaleExtent([0.2, 4]).on('zoom', e => g.attr('transform', e.transform)));
+
+  if (simulation) simulation.stop();
+
+  simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(140))
+    .force('charge', d3.forceManyBody().strength(-350))
+    .force('center', d3.forceCenter(W / 2, H / 2))
+    .force('collision', d3.forceCollide(d => d.radius + 10));
+
+  // Links
+  const link = g.append('g')
+    .selectAll('line').data(links).join('line')
+    .attr('stroke', '#30363d')
+    .attr('stroke-width', d => Math.max(1, Math.min(4, Math.log((d.count || 1) + 1))))
+    .attr('marker-end', 'url(#arrow)');
+
+  // Nodes group
+  const node = g.append('g')
+    .selectAll('g').data(nodes).join('g')
+    .attr('cursor', 'pointer')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    )
+    .on('click', (e, d) => { selectedProject = d.name; currentTab = 'stats'; activateTab('stats'); renderSidebar(); highlightNode(d.name); })
+    .on('mouseover', (e, d) => showTooltip(e, d))
+    .on('mousemove', moveTooltip)
+    .on('mouseout', hideTooltip);
+
+  // Glow filter for selected
+  const filter = defs.append('filter').attr('id', 'glow');
+  filter.append('feGaussianBlur').attr('stdDeviation', '3').attr('result', 'coloredBlur');
+  const feMerge = filter.append('feMerge');
+  feMerge.append('feMergeNode').attr('in', 'coloredBlur');
+  feMerge.append('feMergeNode').attr('in', 'SourceGraphic');
+
+  // Circle
+  node.append('circle')
+    .attr('r', d => d.radius)
+    .attr('fill', d => d.indexed ? clusterColor(d.cluster) : '#21262d')
+    .attr('stroke', d => d.name === selectedProject ? '#ffffff' : '#0d1117')
+    .attr('stroke-width', d => d.name === selectedProject ? 2.5 : 1)
+    .attr('opacity', d => d.indexed ? 0.88 : 0.45);
+
+  // File count inside circle
+  node.filter(d => d.indexed && d.radius > 14).append('text')
+    .attr('text-anchor', 'middle')
+    .attr('dominant-baseline', 'middle')
+    .attr('fill', '#0d1117')
+    .attr('font-size', d => d.radius > 22 ? '10px' : '8px')
+    .attr('font-weight', '700')
+    .attr('pointer-events', 'none')
+    .text(d => (d.files || 0) > 999 ? Math.round(d.files/1000)+'k' : d.files || '');
+
+  // Label below
+  node.append('text')
+    .attr('text-anchor', 'middle')
+    .attr('dy', d => d.radius + 14)
+    .attr('fill', d => d.name === selectedProject ? '#e6edf3' : '#8b949e')
+    .attr('font-size', '11px')
+    .attr('pointer-events', 'none')
+    .text(d => d.name);
+
+  simulation.on('tick', () => {
+    link
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    node.attr('transform', d => `translate(${d.x},${d.y})`);
+  });
+
+  simulation.on('end', () => {
+    document.getElementById('loading').style.display = 'none';
+  });
+
+  setTimeout(() => { document.getElementById('loading').style.display = 'none'; }, 2500);
 }
 
-function renderCard(p, maxComplexity) {
-  if (!p.indexed) {
-    return `<div class="project-card">
-      <div class="card-header">
-        <div class="card-name">${p.name}</div>
-        ${p.cluster ? `<div class="card-cluster">${p.cluster}</div>` : ''}
+function highlightNode(name) {
+  d3.selectAll('#graph-svg circle')
+    .attr('stroke', d => d.name === name ? '#ffffff' : '#0d1117')
+    .attr('stroke-width', d => d.name === name ? 2.5 : 1);
+  d3.selectAll('#graph-svg text[dominant-baseline!="middle"]')
+    .attr('fill', d => d.name === name ? '#e6edf3' : '#8b949e');
+}
+
+// ─── Tooltip ──────────────────────────────────────────────────────────────────
+function showTooltip(e, d) {
+  const tt = document.getElementById('tooltip');
+  document.getElementById('tt-name').textContent = d.name;
+  document.getElementById('tt-files').textContent = d.indexed ? (d.files || 0).toLocaleString() : 'not indexed';
+  document.getElementById('tt-symbols').textContent = d.indexed ? (d.symbols || 0).toLocaleString() : '—';
+  document.getElementById('tt-lines').textContent = d.indexed ? (d.total_lines || 0).toLocaleString() : '—';
+  document.getElementById('tt-cluster').textContent = d.cluster || '—';
+  document.getElementById('tt-langs').textContent = (d.languages || []).join(', ') || '—';
+  tt.style.display = 'block';
+  moveTooltip(e);
+}
+function moveTooltip(e) {
+  const tt = document.getElementById('tooltip');
+  const panel = document.getElementById('graph-panel');
+  const rect = panel.getBoundingClientRect();
+  let x = e.clientX - rect.left + 14, y = e.clientY - rect.top - 10;
+  if (x + 270 > panel.clientWidth) x = e.clientX - rect.left - 280;
+  if (y < 0) y = 4;
+  tt.style.left = x + 'px';
+  tt.style.top = y + 'px';
+}
+function hideTooltip() { document.getElementById('tooltip').style.display = 'none'; }
+
+// ─── Sidebar rendering ────────────────────────────────────────────────────────
+function activateTab(tabName) {
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === tabName);
+  });
+  currentTab = tabName;
+}
+
+function renderSidebar() {
+  if (currentTab === 'projects') renderProjectsTab();
+  else if (currentTab === 'stats') renderStatsTab();
+  else if (currentTab === 'tuning') renderTuningTab();
+}
+
+function fmt(n) { return n == null ? '—' : n.toLocaleString(); }
+function fmtSize(bytes) {
+  if (!bytes) return '—';
+  if (bytes > 1e6) return (bytes / 1e6).toFixed(1) + ' MB';
+  return Math.round(bytes / 1024) + ' KB';
+}
+
+function renderProjectsTab() {
+  const filterCluster = document.getElementById('cluster-filter').value;
+  const list = Object.values(projects)
+    .filter(p => filterCluster === 'all' || p.cluster === filterCluster)
+    .sort((a, b) => (b.files || 0) - (a.files || 0));
+
+  const maxFiles = Math.max(1, ...list.map(p => p.files || 0));
+
+  // Cluster legend
+  const clusters = [...new Set(list.map(p => p.cluster).filter(Boolean))];
+  const legendHtml = clusters.length ? `
+    <div class="legend">
+      ${clusters.map(c => `<div class="legend-item"><div class="legend-dot" style="background:${clusterColor(c)}"></div>${c}</div>`).join('')}
+    </div>` : '';
+
+  document.getElementById('panel-content').innerHTML = legendHtml + list.map(p => `
+    <div class="proj-card${p.name === selectedProject ? ' selected' : ''}${!p.indexed ? ' offline' : ''}"
+         onclick="selectProject('${p.name}')">
+      <div class="pc-name">${p.name}${!p.indexed ? ' <span style="font-size:10px;color:#f78166">not indexed</span>' : ''}</div>
+      <div class="pc-meta">
+        ${p.cluster ? `<span style="color:${clusterColor(p.cluster)}">${p.cluster}</span> &middot; ` : ''}
+        ${p.indexed ? `${fmt(p.files)} files &middot; ${fmt(p.symbols)} symbols` : (p.languages || []).join(', ')}
       </div>
-      <div class="not-indexed">Not indexed — run nexus scan</div>
-    </div>`;
+      ${p.indexed ? `<div class="pc-bar"><div class="pc-bar-fill" style="width:${Math.round((p.files||0)/maxFiles*100)}%;background:${clusterColor(p.cluster)}"></div></div>` : ''}
+    </div>`).join('');
+}
+
+function selectProject(name) {
+  selectedProject = name;
+  highlightNode(name);
+  renderSidebar();
+}
+
+function renderStatsTab() {
+  const p = selectedProject ? projects[selectedProject] : null;
+  const content = document.getElementById('panel-content');
+
+  if (!p) {
+    const indexed = Object.values(projects).filter(x => x.indexed);
+    const totalFiles = indexed.reduce((s, x) => s + (x.files || 0), 0);
+    const totalSymbols = indexed.reduce((s, x) => s + (x.symbols || 0), 0);
+    const totalEdges = indexed.reduce((s, x) => s + (x.edges || 0), 0);
+    const totalLines = indexed.reduce((s, x) => s + (x.total_lines || 0), 0);
+
+    const langTotals = {};
+    indexed.forEach(x => Object.entries(x.language_breakdown || {}).forEach(([lang, cnt]) => {
+      langTotals[lang] = (langTotals[lang] || 0) + cnt;
+    }));
+    const maxLang = Math.max(1, ...Object.values(langTotals));
+
+    content.innerHTML = `
+      <div class="stat-section">
+        <h3>All Projects &mdash; ${indexed.length} indexed</h3>
+        <div class="stat-grid">
+          <div class="stat-box"><div class="sb-val">${fmt(totalFiles)}</div><div class="sb-label">Files</div></div>
+          <div class="stat-box"><div class="sb-val">${fmt(totalSymbols)}</div><div class="sb-label">Symbols</div></div>
+          <div class="stat-box"><div class="sb-val">${fmt(totalEdges)}</div><div class="sb-label">Edges</div></div>
+          <div class="stat-box"><div class="sb-val">${fmt(totalLines)}</div><div class="sb-label">Lines</div></div>
+        </div>
+      </div>
+      <div class="chart-box">
+        <h4>Files by Language</h4>
+        ${Object.entries(langTotals).sort((a,b)=>b[1]-a[1]).map(([lang,cnt]) => `
+          <div class="bar-row">
+            <span class="br-label">${lang}</span>
+            <div class="br-track"><div class="br-fill" style="width:${Math.round(cnt/maxLang*100)}%;background:#58a6ff"></div></div>
+            <span class="br-val">${fmt(cnt)}</span>
+          </div>`).join('')}
+      </div>
+      <p style="font-size:11px;color:#8b949e;margin-top:8px">Click a project node or card to see its details.</p>`;
+    return;
   }
 
-  const score = complexityScore(p);
-  const pct = maxComplexity > 0 ? (score / maxComplexity * 100) : 0;
-  const color = complexityColor(score, maxComplexity);
-  const langs = Object.entries(p.language_breakdown || {});
-  const kinds = Object.entries(p.symbol_kinds || {});
-  const topSyms = p.top_symbols || [];
+  if (!p.indexed) {
+    content.innerHTML = `<p style="color:#8b949e;font-size:13px;margin-top:16px">
+      <strong style="color:#e6edf3">${p.name}</strong> has not been indexed yet.<br><br>
+      Run <code style="color:#58a6ff">nexus_scan(project="...")</code> to index it.</p>`;
+    return;
+  }
 
-  return `<div class="project-card">
-    <div class="card-header">
-      <div class="card-name">${p.name}</div>
-      ${p.cluster ? `<div class="card-cluster">${p.cluster}</div>` : ''}
-    </div>
-    <div class="card-langs">
-      ${langs.map(([l, c]) => `<span class="lang-tag ${LANG_COLORS[l] || ''}">${l} ${c}</span>`).join('')}
-    </div>
-    <div class="card-metrics">
-      <div class="metric"><div class="num">${fmt(p.files)}</div><div class="lbl">files</div></div>
-      <div class="metric"><div class="num">${fmt(p.symbols)}</div><div class="lbl">symbols</div></div>
-      <div class="metric"><div class="num">${fmt(p.edges)}</div><div class="lbl">edges</div></div>
-      <div class="metric"><div class="num">${fmt(p.total_lines)}</div><div class="lbl">lines</div></div>
-    </div>
-    <div class="complexity-bar">
-      <div class="complexity-fill" style="width:${pct}%;background:${color}"></div>
-    </div>
-    <div class="card-details">
-      <div class="detail-grid">
-        <div class="detail-item">Size: <strong>${fmtBytes(p.total_bytes)}</strong></div>
-        <div class="detail-item">Unresolved: <strong>${p.unresolved_imports}</strong></div>
-        <div class="detail-item">Sessions (7d): <strong>${p.recent_sessions_7d}</strong></div>
-        <div class="detail-item">Decisions: <strong>${p.active_decisions}</strong></div>
-        ${p.last_scan_ms != null ? `<div class="detail-item">Last scan: <strong>${p.last_scan_ms}ms</strong></div>` : ''}
+  const maxKind = Math.max(1, ...Object.values(p.symbol_kinds || {}));
+  const maxLang2 = Math.max(1, ...Object.values(p.language_breakdown || {}));
+
+  content.innerHTML = `
+    <div class="stat-section">
+      <h3>${p.name}</h3>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="sb-val">${fmt(p.files)}</div><div class="sb-label">Files</div></div>
+        <div class="stat-box"><div class="sb-val">${fmt(p.symbols)}</div><div class="sb-label">Symbols</div></div>
+        <div class="stat-box"><div class="sb-val">${fmt(p.edges)}</div><div class="sb-label">Edges</div></div>
+        <div class="stat-box"><div class="sb-val">${fmtSize(p.total_bytes)}</div><div class="sb-label">Size</div></div>
       </div>
-      ${kinds.length ? `<div style="margin-top:8px;color:var(--text-dim)">
-        ${kinds.map(([k, c]) => `<span style="margin-right:8px">${k}: ${c}</span>`).join('')}
-      </div>` : ''}
-      ${topSyms.length ? `<div class="top-symbols">
-        <div style="color:var(--text-dim);margin-bottom:4px">Most connected:</div>
-        ${topSyms.slice(0, 5).map(s =>
-          `<div class="sym"><span class="sym-name">${s.name}</span><span>${s.kind}</span><span class="sym-edges">${s.edges} edges</span></div>`
-        ).join('')}
-      </div>` : ''}
     </div>
-  </div>`;
+    ${Object.keys(p.symbol_kinds || {}).length ? `
+    <div class="chart-box">
+      <h4>Symbol Kinds</h4>
+      ${Object.entries(p.symbol_kinds).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v]) => `
+        <div class="bar-row">
+          <span class="br-label">${k}</span>
+          <div class="br-track"><div class="br-fill" style="width:${Math.round(v/maxKind*100)}%;background:#3fb950"></div></div>
+          <span class="br-val">${fmt(v)}</span>
+        </div>`).join('')}
+    </div>` : ''}
+    ${Object.keys(p.language_breakdown || {}).length > 1 ? `
+    <div class="chart-box">
+      <h4>Files by Language</h4>
+      ${Object.entries(p.language_breakdown).sort((a,b)=>b[1]-a[1]).map(([lang,cnt]) => `
+        <div class="bar-row">
+          <span class="br-label">${lang}</span>
+          <div class="br-track"><div class="br-fill" style="width:${Math.round(cnt/maxLang2*100)}%;background:#58a6ff"></div></div>
+          <span class="br-val">${fmt(cnt)}</span>
+        </div>`).join('')}
+    </div>` : ''}
+    ${(p.top_symbols || []).length ? `
+    <div class="chart-box">
+      <h4>Most Connected Symbols</h4>
+      ${p.top_symbols.slice(0,8).map(s => `
+        <div style="font-size:11px;margin:5px 0;display:flex;justify-content:space-between">
+          <span><span style="color:#d2a8ff">${s.kind}</span> <span style="color:#e6edf3">${s.name}</span></span>
+          <span style="color:#8b949e">${s.edges} edges</span>
+        </div>`).join('')}
+    </div>` : ''}
+    <div style="font-size:11px;color:#8b949e;margin-top:4px;line-height:1.6">
+      ${p.unresolved_imports ? `Unresolved imports: ${fmt(p.unresolved_imports)}<br>` : ''}
+      ${p.last_scan_ms ? `Last scan: ${fmt(p.last_scan_ms)}ms<br>` : ''}
+      ${p.recent_sessions_7d != null ? `Sessions (7d): ${p.recent_sessions_7d}<br>` : ''}
+      ${p.active_decisions != null ? `Active decisions: ${p.active_decisions}` : ''}
+    </div>`;
 }
 
-load();
-setInterval(load, 30000); // Auto-refresh every 30s
+function renderTuningTab() {
+  const content = document.getElementById('panel-content');
+
+  if (!Object.keys(tuningData).length) {
+    content.innerHTML = `<p style="color:#8b949e;font-size:13px;margin-top:16px">
+      No tuning data yet.<br><br>
+      Tuning runs automatically after 50 queries with follow-up reads.<br><br>
+      Use <code style="color:#58a6ff">nexus_analytics()</code> to see query history.</p>`;
+    return;
+  }
+
+  const items = selectedProject && tuningData[selectedProject]
+    ? { [selectedProject]: tuningData[selectedProject] }
+    : tuningData;
+
+  content.innerHTML = Object.entries(items).map(([name, data]) => {
+    if (data.error) return `
+      <div class="proj-card">
+        <div class="pc-name">${name}</div>
+        <div class="pc-meta" style="color:#f78166">${data.error}</div>
+      </div>`;
+
+    const confColor = data.confidence === 'high' ? '#3fb950' : data.confidence === 'medium' ? '#ffa657' : '#f78166';
+    return `
+      <div class="proj-card${name === selectedProject ? ' selected' : ''}">
+        <div class="pc-name">${name}</div>
+        <div style="font-size:11px;margin-top:6px">
+          <span style="color:${confColor};font-weight:600">${data.confidence || 'low'}</span>
+          <span style="color:#8b949e"> confidence &middot; ${(data.queries_analyzed || 0).toLocaleString()} queries</span>
+        </div>
+        ${data.boosts ? `
+        <div style="font-size:10px;color:#8b949e;margin-top:10px;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">BM25 Field Boosts</div>
+        ${Object.entries(data.boosts).map(([k,v]) => `
+          <div class="bar-row">
+            <span class="br-label">${k}</span>
+            <div class="br-track"><div class="br-fill" style="width:${Math.round(v/5*100)}%;background:#d2a8ff"></div></div>
+            <span class="br-val">${v}x</span>
+          </div>`).join('')}` : ''}
+        ${data.rrf_weights ? `
+        <div style="font-size:10px;color:#8b949e;margin-top:10px;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">RRF Signal Weights</div>
+        ${Object.entries(data.rrf_weights).map(([k,v]) => `
+          <div class="bar-row">
+            <span class="br-label">${k}</span>
+            <div class="br-track"><div class="br-fill" style="width:${Math.round(v/2*100)}%;background:#ffa657"></div></div>
+            <span class="br-val">${v.toFixed(1)}</span>
+          </div>`).join('')}` : ''}
+        ${data.reasoning && data.reasoning.length ? `
+        <div style="font-size:10px;color:#8b949e;margin-top:10px">
+          ${data.reasoning.map(r => `<div style="margin-top:4px">${r}</div>`).join('')}
+        </div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+// ─── Main render ──────────────────────────────────────────────────────────────
+function render() {
+  const filterCluster = document.getElementById('cluster-filter').value;
+  buildGraph(filterCluster);
+  renderSidebar();
+}
+
+// ─── Event listeners ──────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    activateTab(tab.dataset.tab);
+    renderSidebar();
+  });
+});
+
+document.getElementById('cluster-filter').addEventListener('change', () => render());
+document.getElementById('refresh-btn').addEventListener('click', () => fetchAll());
+
+// Auto-refresh every 30 seconds
+setInterval(fetchAll, 30000);
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+fetchAll();
 </script>
 </body>
 </html>

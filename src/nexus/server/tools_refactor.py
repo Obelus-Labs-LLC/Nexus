@@ -17,6 +17,56 @@ from nexus.server.state import (
 logger = logging.getLogger("nexus.server.tools")
 
 
+def _insert_docstring(file_path: Path, def_line: int, kind: str, docstring: str) -> bool:
+    """Insert a docstring into a Python source file after a def/class line.
+
+    Finds the colon that ends the function/class signature (handles multi-line sigs),
+    then inserts the docstring as the first statement in the body.
+
+    Returns True if the file was modified.
+    """
+    try:
+        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        if not lines or def_line < 1 or def_line > len(lines):
+            return False
+
+        # Find the line where the body starts (after the trailing colon)
+        body_start = def_line - 1  # 0-indexed
+        while body_start < len(lines) and ":" not in lines[body_start]:
+            body_start += 1
+        if body_start >= len(lines):
+            return False
+
+        body_line_idx = body_start + 1  # First line of body
+
+        # Detect indentation from the def line
+        def_text = lines[def_line - 1]
+        indent = len(def_text) - len(def_text.lstrip())
+        body_indent = " " * (indent + 4)
+
+        # Check if docstring already exists
+        if body_line_idx < len(lines):
+            stripped = lines[body_line_idx].strip()
+            if stripped.startswith('"""') or stripped.startswith("'''"):
+                return False  # Already has docstring
+
+        # Build docstring lines
+        if "\n" in docstring or len(docstring) > 88:
+            doc_lines = [
+                f'{body_indent}"""{docstring}\n',
+                f'{body_indent}"""\n',
+            ]
+        else:
+            doc_lines = [f'{body_indent}"""{docstring}"""\n']
+
+        # Insert
+        lines[body_line_idx:body_line_idx] = doc_lines
+        file_path.write_text("".join(lines), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 def register(mcp):
     """Register refactoring and enrichment tools with the MCP server."""
 
@@ -181,6 +231,7 @@ def register(mcp):
             f"## Cross-Project Edges: {cluster}",
             f"Edges found: {result.edges_added}",
             f"Projects linked: {len(result.projects_linked)}",
+            f"Projects skipped (unchanged imports): {result.projects_skipped}",
             f"Duration: {result.duration_ms}ms",
         ]
 
@@ -190,6 +241,252 @@ def register(mcp):
             for a, b in sorted(result.projects_linked):
                 lines.append(f"  {a} <-> {b}")
 
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def nexus_diff(
+        ref: str = "HEAD~1",
+        show_dependents: bool = True,
+    ) -> str:
+        """Show files changed since a git ref and their downstream dependents in the graph.
+
+        Answers the question: "If I changed these files, what else could break?"
+        Runs git diff to get changed files, then traces the dependency graph to find
+        all files that import or reference those changed files.
+
+        Args:
+            ref: Git ref to diff against (default: "HEAD~1", the last commit).
+                 Examples: "main", "HEAD~3", a commit SHA.
+            show_dependents: If True, trace downstream dependents (default: True).
+        """
+        check_rate_limit()
+        import subprocess
+
+        db = get_db()
+        config = get_config()
+
+        # Run git diff to get changed files
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", ref, "HEAD"],
+                cwd=str(config.root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return f"git diff failed: {result.stderr.strip()}"
+        except FileNotFoundError:
+            return "git not found. nexus_diff requires git in PATH."
+        except subprocess.TimeoutExpired:
+            return "git diff timed out."
+
+        changed_rel = [
+            line.strip() for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+
+        if not changed_rel:
+            return f"No files changed between {ref} and HEAD."
+
+        # Resolve to files in the index
+        indexed_changed = []
+        not_indexed = []
+        for rel in changed_rel:
+            f = db.get_file_by_path(rel)
+            if f:
+                indexed_changed.append((rel, f["id"]))
+            else:
+                not_indexed.append(rel)
+
+        lines = [
+            f"## nexus_diff: {ref} → HEAD",
+            f"Changed files: {len(changed_rel)} ({len(indexed_changed)} indexed)",
+            "",
+        ]
+
+        for rel in changed_rel:
+            marker = "📄" if any(r == rel for r, _ in indexed_changed) else "·"
+            lines.append(f"  {marker} {rel}")
+
+        if not_indexed:
+            lines.append(f"\n  (+ {len(not_indexed)} files not in index)")
+
+        if not show_dependents or not indexed_changed:
+            return "\n".join(lines)
+
+        # Trace dependents: find all files that import changed files
+        lines.append("\n## Downstream Dependents")
+
+        all_dependents: dict[str, set[str]] = {}  # changed_file -> {dependent_files}
+
+        with db.connect() as conn:
+            for rel, file_id in indexed_changed:
+                deps = conn.execute(
+                    """SELECT DISTINCT f1.path
+                    FROM edges e
+                    JOIN symbols s1 ON e.source_id = s1.id
+                    JOIN symbols s2 ON e.target_id = s2.id
+                    JOIN files f1 ON s1.file_id = f1.id
+                    WHERE s2.file_id = ? AND s1.file_id != ?
+                    AND e.kind IN ('imports', 'references', 'calls')""",
+                    (file_id, file_id),
+                ).fetchall()
+                dep_paths = {d["path"] for d in deps}
+                # Exclude files that are themselves changed
+                changed_paths = {r for r, _ in indexed_changed}
+                dep_paths -= changed_paths
+                if dep_paths:
+                    all_dependents[rel] = dep_paths
+
+        if not all_dependents:
+            lines.append("  No dependents found in index.")
+        else:
+            total_unique = len(set().union(*all_dependents.values()))
+            lines.append(f"  {total_unique} unique file(s) may be affected:\n")
+            for changed_file, dependents in sorted(all_dependents.items()):
+                lines.append(f"  {changed_file}")
+                for dep in sorted(dependents)[:10]:
+                    lines.append(f"    ← {dep}")
+                if len(dependents) > 10:
+                    lines.append(f"    ← ... and {len(dependents) - 10} more")
+
+        logger.info("nexus_diff: %d changed, %d with dependents", len(changed_rel), len(all_dependents))
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def nexus_docstring(
+        path: str = "",
+        limit: int = 20,
+        dry_run: bool = False,
+    ) -> str:
+        """Auto-generate docstrings for undocumented Python symbols using Claude Haiku.
+
+        Finds public functions and classes with no docstring, calls Claude Haiku
+        (claude-haiku-4-5-20251001) with the symbol's signature and body, and writes
+        the generated docstring back into the source file.
+
+        Requires the 'anthropic' package: pip install anthropic
+        Requires ANTHROPIC_API_KEY environment variable.
+
+        Args:
+            path: File or directory to process (relative to project root). Empty = whole project.
+            limit: Max number of symbols to process per call (default: 20).
+            dry_run: If True, shows what would be generated without writing to files.
+        """
+        check_rate_limit()
+        import os
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            return (
+                "ANTHROPIC_API_KEY not set. Export it before using nexus_docstring.\n"
+                "Example: set ANTHROPIC_API_KEY=sk-ant-..."
+            )
+
+        try:
+            import anthropic
+        except ImportError:
+            return (
+                "anthropic package not installed. Run: pip install anthropic\n"
+                "Then re-run nexus_docstring."
+            )
+
+        db = get_db()
+        config = get_config()
+        tracker = get_tracker()
+
+        # Find undocumented public symbols
+        with db.connect() as conn:
+            if path:
+                rows = conn.execute(
+                    """SELECT s.id, s.name, s.qualified, s.kind, s.signature, s.body_text,
+                              s.line_start, f.path as file_path, f.language
+                       FROM symbols s JOIN files f ON s.file_id = f.id
+                       WHERE (f.path = ? OR f.path LIKE ?)
+                       AND s.docstring IS NULL AND s.visibility = 'public'
+                       AND s.kind IN ('function', 'class', 'method')
+                       AND f.language = 'python'
+                       ORDER BY f.path, s.line_start
+                       LIMIT ?""",
+                    (path, path.rstrip("/") + "/%", limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT s.id, s.name, s.qualified, s.kind, s.signature, s.body_text,
+                              s.line_start, f.path as file_path, f.language
+                       FROM symbols s JOIN files f ON s.file_id = f.id
+                       WHERE s.docstring IS NULL AND s.visibility = 'public'
+                       AND s.kind IN ('function', 'class', 'method')
+                       AND f.language = 'python'
+                       ORDER BY f.path, s.line_start
+                       LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+
+        if not rows:
+            return f"No undocumented public symbols found{' in ' + path if path else ''}."
+
+        client = anthropic.Anthropic(api_key=api_key)
+        processed = 0
+        skipped = 0
+        results = []
+
+        for sym in rows:
+            sig = sym["signature"] or sym["name"]
+            body = (sym["body_text"] or "")[:600]  # Limit body to avoid huge prompts
+
+            prompt = (
+                f"Write a concise, accurate Python docstring for this {sym['kind']}.\n"
+                f"Return ONLY the docstring text (no quotes, no def line).\n"
+                f"One sentence for simple functions, multi-line for complex ones.\n\n"
+                f"Signature: {sig}\n"
+                f"Body:\n{body}"
+            )
+
+            try:
+                message = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=200,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                docstring = message.content[0].text.strip().strip('"\'')
+
+                if not docstring:
+                    skipped += 1
+                    continue
+
+                result_line = f"  {sym['qualified']}: {docstring[:80]}{'...' if len(docstring) > 80 else ''}"
+                results.append(result_line)
+
+                if not dry_run:
+                    # Write docstring into the source file
+                    abs_path = config.root / sym["file_path"]
+                    if abs_path.exists() and abs_path.suffix == ".py":
+                        _insert_docstring(abs_path, sym["line_start"], sym["kind"], docstring)
+                        tracker.log_edit(sym["file_path"], f"added docstring to {sym['name']}")
+
+                processed += 1
+
+            except Exception as e:
+                skipped += 1
+                logger.warning("Docstring generation failed for %s: %s", sym["qualified"], e)
+
+        lines = [
+            f"## nexus_docstring{'(dry run)' if dry_run else ''}",
+            f"Processed: {processed} symbols | Skipped: {skipped}",
+            f"Total undocumented: {len(rows)}",
+            "",
+        ]
+
+        if results:
+            lines.append("Generated docstrings:")
+            lines.extend(results)
+
+        if not dry_run and processed > 0:
+            lines.append("\nRun nexus_register_edit to update the index with new docstrings.")
+
+        logger.info("nexus_docstring: %d generated, %d skipped", processed, skipped)
         return "\n".join(lines)
 
     @mcp.tool()

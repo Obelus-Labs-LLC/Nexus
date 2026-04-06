@@ -17,6 +17,18 @@ rank = [
     "scipy>=1.11.0",
     "fast-pagerank>=0.0.5",
 ]
+watch = [
+    "watchdog>=4.0",
+]
+ai = [
+    "anthropic>=0.40.0",
+]
+integrations = [
+    # Optional: faster HTTP for integrations (stdlib urllib used by default)
+]
+all = [
+    "nexus[rank,watch,ai]",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
