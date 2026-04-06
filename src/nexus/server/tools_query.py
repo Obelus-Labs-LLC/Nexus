@@ -10,10 +10,177 @@ from nexus.server.state import (
     ensure_ranking,
     get_config,
     get_db,
+    get_rrf_weights,
     get_tracker,
+    register_active_session,
+    reload_tuned_weights,
 )
 
 logger = logging.getLogger("nexus.server.tools")
+
+_AUTO_TUNE_INTERVAL = 50  # Trigger auto-tune every N queries
+
+
+def _maybe_auto_tune(db) -> None:
+    """Run analyze_and_tune + apply_tuning if enough query history exists."""
+    import time
+
+    try:
+        # Check query count since last tune
+        with db.connect() as conn:
+            table_check = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='query_history'"
+            ).fetchone()
+            if not table_check:
+                return
+
+            count = conn.execute("SELECT COUNT(*) as c FROM query_history").fetchone()["c"]
+            if count == 0 or count % _AUTO_TUNE_INTERVAL != 0:
+                return
+
+        from nexus.rank.tuner import analyze_and_tune, apply_tuning
+        result = analyze_and_tune(db, days=30)
+        if result.confidence in ("medium", "high"):
+            apply_tuning(db, result)
+            reload_tuned_weights(db)
+            logger.info(
+                "Auto-tuned: %d queries analyzed, confidence=%s",
+                result.queries_analyzed, result.confidence,
+            )
+    except Exception as e:
+        logger.debug("Auto-tune skipped: %s", e)
+
+
+def _detect_circular_deps(db) -> str:
+    """Return a warning string if circular dependencies exist, empty string otherwise."""
+    try:
+        with db.connect() as conn:
+            # Build adjacency from edges
+            rows = conn.execute(
+                """SELECT DISTINCT f1.path as src, f2.path as dst
+                FROM edges e
+                JOIN symbols s1 ON e.source_id = s1.id
+                JOIN symbols s2 ON e.target_id = s2.id
+                JOIN files f1 ON s1.file_id = f1.id
+                JOIN files f2 ON s2.file_id = f2.id
+                WHERE s1.file_id != s2.file_id
+                AND e.kind IN ('imports', 'references', 'calls')"""
+            ).fetchall()
+
+        adj: dict[str, set[str]] = {}
+        for r in rows:
+            adj.setdefault(r["src"], set()).add(r["dst"])
+
+        cycles = []
+        seen_pairs: set[tuple[str, str]] = set()
+        for a, deps_a in adj.items():
+            for b in deps_a:
+                if b in adj and a in adj[b]:
+                    pair = (min(a, b), max(a, b))
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        cycles.append(pair)
+
+        if not cycles:
+            return ""
+
+        alert_lines = [f"⚠ Circular dependencies detected ({len(cycles)} pair(s)):"]
+        for a, b in cycles[:5]:
+            alert_lines.append(f"  {a} <-> {b}")
+        if len(cycles) > 5:
+            alert_lines.append(f"  ... and {len(cycles) - 5} more (run nexus_deps for full list)")
+        return "\n".join(alert_lines)
+    except Exception:
+        return ""
+
+
+def _background_checks(project_root, db) -> str:
+    """Run silent background checks and return only actionable alerts.
+
+    Checks: OSV vulnerability scan on project deps, GitHub VCS status.
+    Results are cached per project (1-hour TTL for security, 15-min for VCS).
+    Returns empty string if nothing actionable found.
+    """
+    import time
+    from pathlib import Path
+
+    alerts: list[str] = []
+    now = time.time()
+
+    # ── Security: OSV dep scan (no key needed, cached 1h) ────────────────────
+    try:
+        cache_file = db._db_path.parent / "_bg_security_cache.txt"
+        run_security = True
+        if cache_file.exists():
+            age = now - cache_file.stat().st_mtime
+            if age < 3600:  # 1-hour cache
+                cached = cache_file.read_text().strip()
+                if cached:
+                    alerts.append(cached)
+                run_security = False
+
+        if run_security:
+            from nexus.server.tools_integrations import _extract_dep_names
+            dep_names = _extract_dep_names(Path(project_root))
+            if dep_names:
+                from nexus.integrations.security import osv_check_packages
+                pypi_deps = [(n, v) for n, v, eco in dep_names if eco == "PyPI"]
+                npm_deps = [(n, v) for n, v, eco in dep_names if eco == "npm"]
+                vulns = []
+                if pypi_deps:
+                    vulns.extend(osv_check_packages(pypi_deps[:20], ecosystem="PyPI"))
+                if npm_deps:
+                    vulns.extend(osv_check_packages(npm_deps[:20], ecosystem="npm"))
+
+                if vulns:
+                    alert = f"⚠ Security: {len(vulns)} known vulnerabilities in dependencies. Run `nexus_security` for details."
+                    cache_file.write_text(alert)
+                    alerts.append(alert)
+                else:
+                    cache_file.write_text("")  # Empty = clean, still cached
+    except Exception:
+        pass
+
+    # ── VCS: GitHub recent activity (cached 15min) ────────────────────────────
+    try:
+        import os
+        if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
+            vcs_cache = db._db_path.parent / "_bg_vcs_cache.txt"
+            run_vcs = True
+            if vcs_cache.exists():
+                age = now - vcs_cache.stat().st_mtime
+                if age < 900:  # 15-min cache
+                    cached = vcs_cache.read_text().strip()
+                    if cached:
+                        alerts.append(cached)
+                    run_vcs = False
+
+            if run_vcs:
+                from nexus.integrations.vcs import get_vcs_summary
+                summary = get_vcs_summary(Path(project_root))
+                vcs_alerts = []
+
+                # Surface failed CI runs
+                failed = [
+                    r for r in summary.get("github_workflows", [])
+                    if r.get("conclusion") in ("failure", "cancelled")
+                ]
+                if failed:
+                    vcs_alerts.append(f"CI: {len(failed)} failed run(s) — {failed[0].get('name', '')}")
+
+                # Surface recent open issues count
+                issues = summary.get("github_issues", [])
+                if len(issues) >= 5:
+                    vcs_alerts.append(f"GitHub: {len(issues)}+ open issues")
+
+                alert_str = " | ".join(vcs_alerts) if vcs_alerts else ""
+                vcs_cache.write_text(alert_str)
+                if alert_str:
+                    alerts.append(f"📡 VCS: {alert_str}")
+    except Exception:
+        pass
+
+    return "\n".join(alerts)
 
 
 def register(mcp):
@@ -25,7 +192,7 @@ def register(mcp):
         project: str,
         languages: str = "python",
         top_k: int = 15,
-        budget: int = 32000,
+        budget: int = 16000,
     ) -> str:
         """Mandatory first call. Scans project (if needed), ranks files by relevance,
         and returns packed context with confidence level.
@@ -37,7 +204,7 @@ def register(mcp):
             project: Absolute path to the project root directory.
             languages: Comma-separated languages to index (default: "python").
             top_k: Number of top files to return (default: 15).
-            budget: Max characters of context to return (default: 32000).
+            budget: Max characters of context to return (default: 16000).
         """
         check_rate_limit()
         from nexus.index.pipeline import index_project
@@ -64,6 +231,7 @@ def register(mcp):
         tracker = get_tracker()
         tracker.log_query(query)
 
+        register_active_session(db, tracker.session_id, config.name)
         cleanup_expired(db)
 
         bm25, pr = ensure_ranking(db)
@@ -82,8 +250,13 @@ def register(mcp):
                 item["file_path"] = row["path"] if row else ""
 
         recency_results = tracker.get_recency_rankings(db) or None
+        rrf_weights = get_rrf_weights()
 
-        fused = fuse_rankings(bm25_results, pr_results, recency_results=recency_results, top_k=top_k)
+        fused = fuse_rankings(
+            bm25_results, pr_results,
+            recency_results=recency_results, top_k=top_k,
+            rrf_weights=rrf_weights,
+        )
         confidence = compute_confidence(fused)
 
         packed = pack_context(fused, db, config.root, budget=budget)
@@ -91,6 +264,9 @@ def register(mcp):
 
         result_files = [f["file_path"] for f in fused if "file_path" in f]
         log_query_result(db, query, result_files, confidence, tracker.session_id)
+
+        # Auto-trigger tuning every 50 queries when enough data exists
+        _maybe_auto_tune(db)
 
         lines = [
             f"## Nexus Start: {config.name}",
@@ -107,6 +283,18 @@ def register(mcp):
         else:
             lines.append("Low confidence: Results may be incomplete. Use grep/read to explore further.")
 
+        # Inject circular dependency alert if cycles exist in project
+        cycle_alert = _detect_circular_deps(db)
+        if cycle_alert:
+            lines.append("")
+            lines.append(cycle_alert)
+
+        # Silent background checks: security vulns + VCS/CI alerts
+        bg_alerts = _background_checks(config.root, db)
+        if bg_alerts:
+            lines.append("")
+            lines.append(bg_alerts)
+
         decisions = get_active_decisions(db)
         if decisions:
             lines.append("")
@@ -122,7 +310,7 @@ def register(mcp):
     def nexus_retrieve(
         query: str,
         top_k: int = 20,
-        budget: int = 32000,
+        budget: int = 16000,
     ) -> str:
         """Query the graph for relevant files using BM25 + PageRank + RRF fusion.
 
@@ -137,10 +325,12 @@ def register(mcp):
         check_rate_limit()
         from nexus.rank.fusion import compute_confidence, fuse_rankings
         from nexus.rank.packer import format_packed_context, pack_context
+        from nexus.session.analytics import detect_and_log_feedback
 
         db = get_db()
         config = get_config()
         tracker = get_tracker()
+        detect_and_log_feedback(db, tracker.session_id, query)
         tracker.log_query(query)
 
         bm25, pr = ensure_ranking(db)
@@ -157,8 +347,13 @@ def register(mcp):
                 item["file_path"] = row["path"] if row else ""
 
         recency_results = tracker.get_recency_rankings(db) or None
+        rrf_weights = get_rrf_weights()
 
-        fused = fuse_rankings(bm25_results, pr_results, recency_results=recency_results, top_k=top_k)
+        fused = fuse_rankings(
+            bm25_results, pr_results,
+            recency_results=recency_results, top_k=top_k,
+            rrf_weights=rrf_weights,
+        )
         confidence = compute_confidence(fused)
 
         packed = pack_context(fused, db, config.root, budget=budget)
@@ -368,6 +563,18 @@ def register(mcp):
             else:
                 lines.append("No circular dependencies detected.")
 
+        # Suggest package vulnerability check if OSV/NVD available
+        try:
+            from nexus.integrations.base import _INTEGRATION_ENV_MAP
+            from nexus.integrations.base import _get_env as _iget
+            osv_ready = True  # no key required
+            nvd_ready = True  # no key required
+            if osv_ready or nvd_ready:
+                lines.append("")
+                lines.append("Tip: Run `nexus_security` to check dependencies for known CVEs/vulnerabilities.")
+        except Exception:
+            pass
+
         return "\n".join(lines)
 
     @mcp.tool()
@@ -386,3 +593,142 @@ def register(mcp):
         db = get_db()
         report = get_analytics_report(db, days=days)
         return format_analytics_report(report)
+
+    @mcp.tool()
+    def nexus_summarize(
+        path: str = "",
+        depth: str = "medium",
+    ) -> str:
+        """Generate a natural-language summary of a file or directory from its symbols and docstrings.
+
+        Useful for understanding unfamiliar code without reading every line.
+        Summarizes purpose, public API, key classes/functions, and dependencies.
+
+        Args:
+            path: File or directory path relative to project root. Empty = whole project.
+            depth: "brief" (one-liners only), "medium" (default), or "detailed" (include signatures).
+        """
+        check_rate_limit()
+        db = get_db()
+        config = get_config()
+
+        with db.connect() as conn:
+            if path:
+                # Try exact file match first
+                file_row = conn.execute(
+                    "SELECT id, path, language, line_count FROM files WHERE path = ?",
+                    (path,),
+                ).fetchone()
+                if file_row:
+                    files = [file_row]
+                else:
+                    files = conn.execute(
+                        "SELECT id, path, language, line_count FROM files "
+                        "WHERE path LIKE ? ORDER BY path",
+                        (path.rstrip("/") + "/%",),
+                    ).fetchall()
+            else:
+                files = conn.execute(
+                    "SELECT id, path, language, line_count FROM files ORDER BY path"
+                ).fetchall()
+
+        if not files:
+            return f"No files found matching '{path}'"
+
+        lines = [f"## Summary: {path or config.name}", ""]
+
+        for f in files[:30]:
+            file_id = f["id"]
+            file_path = f["path"]
+
+            with db.connect() as conn:
+                syms = conn.execute(
+                    "SELECT name, kind, signature, docstring, visibility "
+                    "FROM symbols WHERE file_id = ? AND visibility = 'public' "
+                    "ORDER BY kind, name",
+                    (file_id,),
+                ).fetchall()
+
+                imports_count = conn.execute(
+                    """SELECT COUNT(DISTINCT f2.id) as c
+                    FROM edges e
+                    JOIN symbols s1 ON e.source_id = s1.id
+                    JOIN symbols s2 ON e.target_id = s2.id
+                    JOIN files f2 ON s2.file_id = f2.id
+                    WHERE s1.file_id = ? AND s2.file_id != ?""",
+                    (file_id, file_id),
+                ).fetchone()["c"]
+
+            if not syms and len(files) > 1:
+                continue
+
+            classes = [s for s in syms if s["kind"] in ("class", "struct", "enum")]
+            functions = [s for s in syms if s["kind"] in ("function", "method") and s["visibility"] == "public"]
+
+            lines.append(f"### {file_path}")
+            lines.append(f"  Language: {f['language']} | Lines: {f['line_count']} | Deps: {imports_count}")
+
+            if classes:
+                lines.append(f"  Classes: {', '.join(c['name'] for c in classes)}")
+                if depth in ("medium", "detailed"):
+                    for cls in classes[:5]:
+                        doc = (cls["docstring"] or "").split("\n")[0][:100]
+                        lines.append(f"    {cls['name']}: {doc}" if doc else f"    {cls['name']}")
+
+            if functions:
+                func_names = [fn["name"] for fn in functions[:10]]
+                lines.append(f"  Public API: {', '.join(func_names)}")
+                if depth == "detailed":
+                    for fn in functions[:8]:
+                        doc = (fn["docstring"] or "").split("\n")[0][:120]
+                        sig = fn["signature"] or ""
+                        if doc:
+                            lines.append(f"    {fn['name']}({sig}): {doc}")
+                        elif sig:
+                            lines.append(f"    {fn['name']}({sig})")
+
+            lines.append("")
+
+        if len(files) > 30:
+            lines.append(f"... and {len(files) - 30} more files (use a narrower path for detail)")
+
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def nexus_feedback(
+        query: str,
+        found_files: str,
+    ) -> str:
+        """Provide explicit feedback that the index missed files for a query.
+
+        Call this when nexus_start or nexus_retrieve returned low confidence
+        and you found the relevant files manually (via grep, read, etc.).
+        This signal is used to improve future ranking for this project.
+
+        Args:
+            query: The original query that had poor results.
+            found_files: Comma-separated paths of files that were actually relevant.
+        """
+        check_rate_limit()
+        from nexus.session.analytics import log_feedback
+
+        db = get_db()
+        tracker = get_tracker()
+
+        file_list = [f.strip() for f in found_files.split(",") if f.strip()]
+        if not file_list:
+            return "No files provided. Pass comma-separated file paths in found_files."
+
+        log_feedback(
+            db=db,
+            session_id=tracker.session_id,
+            original_query=query,
+            original_confidence="unknown",
+            manual_files=file_list,
+        )
+
+        logger.info("Feedback logged: query=%r, files=%d", query, len(file_list))
+        return (
+            f"Feedback recorded: {len(file_list)} files marked as relevant for '{query}'.\n"
+            "This will improve ranking for future queries on this project."
+        )
