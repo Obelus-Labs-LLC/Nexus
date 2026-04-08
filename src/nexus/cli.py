@@ -212,12 +212,23 @@ def _cmd_hook() -> None:
 
     file_path = Path(file_path_str).resolve()
 
-    # Walk up from the edited file to find the nearest project root (.nexus dir)
+    # Walk up from the edited file to find the nearest project root (.nexus dir).
+    # Use the scanner guard to reject candidates that are user home / system dirs,
+    # otherwise an edit outside any real project climbs up to ~ and the hook
+    # happily scans the entire user profile (this actually happened — 1.84 GB
+    # of garbage before the guard existed).
+    from nexus.index.scanner import _validate_project_root
+
     project_root: Path | None = None
     for candidate in [file_path.parent, *file_path.parent.parents]:
-        if (candidate / ".nexus").is_dir():
-            project_root = candidate
-            break
+        if not (candidate / ".nexus").is_dir():
+            continue
+        try:
+            _validate_project_root(candidate)
+        except ValueError:
+            continue  # user home or system dir — skip and keep walking up
+        project_root = candidate
+        break
 
     if project_root is None:
         sys.exit(0)

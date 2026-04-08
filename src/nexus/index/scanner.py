@@ -57,6 +57,62 @@ class ScanResult:
     duration_ms: int = 0
 
 
+# Package-manager / vendor directory names that must never be a project root
+# (but may legally appear deep inside one, e.g. as an ignored subdirectory).
+_FORBIDDEN_ROOT_NAMES: set[str] = {
+    "site-packages", "node_modules", "target",
+    ".cargo", ".rustup", ".npm", ".nuget",
+}
+
+# Path-prefix sequences that indicate a system install location, not project code.
+# Matched case-insensitively against any contiguous window of the resolved path.
+_FORBIDDEN_PATH_SEQUENCES: tuple[tuple[str, ...], ...] = (
+    ("appdata", "local", "programs"),  # C:\Users\X\AppData\Local\Programs\Python\...
+    ("appdata", "local", "packages"),  # C:\Users\X\AppData\Local\Packages\...
+    ("appdata", "roaming"),            # C:\Users\X\AppData\Roaming\...
+    ("program files",),
+    ("program files (x86)",),
+    ("windows", "system32"),
+)
+
+
+def _validate_project_root(root: Path) -> None:
+    """Refuse project roots that are the user home, a system install
+    location, or a package-manager directory.
+
+    Bug history: a scan once ran with the user home as its root and
+    indexed ~48K files from AppData/Local/Programs/Python before hitting
+    the file cap. The DB ended up ~1.8 GB of garbage and the MCP server
+    couldn't survive its own startup. Never again.
+    """
+    resolved = root.resolve()
+    home = Path.home().resolve()
+
+    # 1. User home or parent-of-home is never a project.
+    if resolved == home or resolved == home.parent:
+        raise ValueError(
+            f"Refusing to scan user home directory: {resolved}. "
+            "Project roots must be a specific project subdirectory."
+        )
+
+    # 2. Final path segment can't be a package-manager dir.
+    if resolved.name in _FORBIDDEN_ROOT_NAMES:
+        raise ValueError(
+            f"Refusing to scan package-manager directory: {resolved}."
+        )
+
+    # 3. Path must not traverse a system install location.
+    parts_lower = [p.lower() for p in resolved.parts]
+    for seq in _FORBIDDEN_PATH_SEQUENCES:
+        seq_len = len(seq)
+        for i in range(len(parts_lower) - seq_len + 1):
+            if tuple(parts_lower[i : i + seq_len]) == seq:
+                raise ValueError(
+                    f"Refusing to scan {resolved}: contains forbidden "
+                    f"system path segment '{'/'.join(seq)}'."
+                )
+
+
 def scan_project(
     config: ProjectConfig,
     db: NexusDB,
@@ -67,6 +123,7 @@ def scan_project(
     Returns a ScanResult summarizing what changed.
     If force=True, re-indexes all files regardless of SHA-256 match.
     """
+    _validate_project_root(config.root)
     start = time.monotonic()
     result = ScanResult()
 
