@@ -176,7 +176,9 @@ def register(mcp):
                 "",
             ]
 
-            return "\n".join(header_lines) + content
+            from nexus.util.sanitize import annotate_injections
+            result = "\n".join(header_lines) + content
+            return annotate_injections(result)
 
     @mcp.tool()
     def nexus_symbols(

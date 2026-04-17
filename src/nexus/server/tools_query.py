@@ -305,6 +305,10 @@ def register(mcp):
         lines.append(context)
 
         result = "\n".join(lines)
+
+        from nexus.util.sanitize import annotate_injections
+        result = annotate_injections(result)
+
         track_token_usage(len(result), "nexus_start")
         logger.info("nexus_start: %s, confidence=%s, files=%d", config.name, confidence, len(fused))
         return result
@@ -371,6 +375,10 @@ def register(mcp):
         ]
 
         result = "\n".join(lines)
+
+        from nexus.util.sanitize import annotate_injections
+        result = annotate_injections(result)
+
         track_token_usage(len(result), "nexus_retrieve")
         return result
 

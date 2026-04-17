@@ -81,13 +81,20 @@ def _granularity_levels(
     """
     levels: list[tuple[str, str]] = []
 
-    # Level 1: Full file content
+    # Level 1: Full file content (semantically compressed)
     abs_path = project_root / file_path
     if abs_path.exists():
         try:
             full = abs_path.read_text(errors="replace")
+            # Determine language from extension for compression
+            from nexus.util.sanitize import compress_code
+            ext = abs_path.suffix.lower()
+            lang = {".py": "python", ".rs": "rust", ".ts": "typescript",
+                    ".js": "javascript", ".go": "go", ".java": "java",
+                    ".c": "c", ".h": "c"}.get(ext, "")
+            compressed = compress_code(full, lang)
             header = f"### {file_path}\n"
-            levels.append(("full", header + full))
+            levels.append(("full", header + compressed))
         except Exception:
             pass
 
