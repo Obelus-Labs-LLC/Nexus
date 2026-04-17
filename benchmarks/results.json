@@ -1,0 +1,89 @@
+{
+  "project": "C:\\Users\\dshon\\Projects\\Nexus",
+  "total_source_chars": 571845,
+  "total_source_files": 77,
+  "query_results": [
+    {
+      "query": "fix the BM25 tokenizer for camelCase identifiers",
+      "naive_chars": 134822,
+      "naive_files": 16,
+      "nexus_chars": 16047,
+      "nexus_files": 7,
+      "nexus_confidence": "medium",
+      "nexus_seconds": 0.026,
+      "reduction_pct": 88.1
+    },
+    {
+      "query": "add a new MCP tool to the query module",
+      "naive_chars": 479260,
+      "naive_files": 49,
+      "nexus_chars": 16055,
+      "nexus_files": 12,
+      "nexus_confidence": "medium",
+      "nexus_seconds": 0.015,
+      "reduction_pct": 96.7
+    },
+    {
+      "query": "how does the PageRank file-ranking work",
+      "naive_chars": 516124,
+      "naive_files": 59,
+      "nexus_chars": 16054,
+      "nexus_files": 10,
+      "nexus_confidence": "medium",
+      "nexus_seconds": 0.012,
+      "reduction_pct": 96.9
+    },
+    {
+      "query": "where is the tree-sitter parser initialised",
+      "naive_chars": 240714,
+      "naive_files": 21,
+      "nexus_chars": 16045,
+      "nexus_files": 11,
+      "nexus_confidence": "medium",
+      "nexus_seconds": 0.012,
+      "reduction_pct": 93.3
+    },
+    {
+      "query": "update rate limiting for tool calls",
+      "naive_chars": 413444,
+      "naive_files": 41,
+      "nexus_chars": 16032,
+      "nexus_files": 10,
+      "nexus_confidence": "medium",
+      "nexus_seconds": 0.014,
+      "reduction_pct": 96.1
+    },
+    {
+      "query": "what SQL schema changes are in migration 5",
+      "naive_chars": 188263,
+      "naive_files": 20,
+      "nexus_chars": 16031,
+      "nexus_files": 7,
+      "nexus_confidence": "medium",
+      "nexus_seconds": 0.012,
+      "reduction_pct": 91.5
+    },
+    {
+      "query": "integrate fastembed optional dependency",
+      "naive_chars": 245711,
+      "naive_files": 17,
+      "nexus_chars": 16047,
+      "nexus_files": 7,
+      "nexus_confidence": "medium",
+      "nexus_seconds": 0.014,
+      "reduction_pct": 93.5
+    },
+    {
+      "query": "debug the semantic extract_block refactoring",
+      "naive_chars": 186669,
+      "naive_files": 18,
+      "nexus_chars": 16034,
+      "nexus_files": 10,
+      "nexus_confidence": "medium",
+      "nexus_seconds": 0.015,
+      "reduction_pct": 91.4
+    }
+  ],
+  "median_reduction_pct": 93.4,
+  "avg_reduction_pct": 93.4375
+}

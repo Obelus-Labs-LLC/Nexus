@@ -21,6 +21,19 @@ MAX_DOCSTRING_CALLS_PER_SESSION = 40
 _docstring_calls_this_session = 0
 
 
+def _format_edit_result(op: str, result, dry_run: bool) -> str:
+    """Format a semantic_edit EditResult for MCP text output."""
+    if not result.ok:
+        return f"nexus_{op} failed: {result.error}"
+    mode = "DRY RUN (no files written)" if dry_run else f"applied to {len(result.files_changed)} file(s)"
+    header = f"## nexus_{op} — {mode}"
+    body = result.preview or "(no diff)"
+    if result.files_changed:
+        files = "\n".join(f"  {f}" for f in result.files_changed)
+        return f"{header}\nFiles changed:\n{files}\n\n{body}"
+    return f"{header}\n\n{body}"
+
+
 def _insert_docstring(file_path: Path, def_line: int, kind: str, docstring: str) -> bool:
     """Insert a docstring into a Python source file after a def/class line.
 
@@ -563,3 +576,260 @@ def register(mcp):
             f"Remembered [{type}]: {content}\n"
             f"Active decisions: {len(active)}/15"
         )
+
+    # ========================================================================
+    # Concept Graph (MegaMemory-inspired long-lived knowledge)
+    # ========================================================================
+
+    @mcp.tool()
+    def nexus_concept(
+        action: str,
+        name: str = "",
+        summary: str = "",
+        kind: str = "concept",
+        body: str = "",
+        confidence: float = 0.7,
+        # relation/attach args
+        target: str = "",
+        relation: str = "related_to",
+        file: str = "",
+        symbol: str = "",
+        weight: float = 1.0,
+    ) -> str:
+        """Manage the long-lived concept graph.
+
+        Unlike nexus_remember (7-day TTL, 20-word cap), concepts are permanent
+        named nodes in a traversable knowledge graph. Use them for architectural
+        ideas, design patterns, conventions, risks, and glossary terms.
+
+        Actions:
+          - "upsert": create or update a concept. Required: name, summary.
+          - "link":   link two concepts with a typed relation. Required: name, target.
+          - "attach_file": pin a concept to a file. Required: name, file.
+          - "attach_symbol": pin a concept to a symbol's qualified name. Required: name, symbol.
+          - "view":   show a concept and its direct neighbors. Required: name.
+          - "list":   list recent concepts (optionally filter by kind).
+          - "delete": remove a concept and all its edges/links. Required: name.
+
+        Valid kinds: concept, pattern, convention, risk, glossary, architecture,
+                     decision, invariant.
+        Valid relations: related_to, depends_on, contradicts, refines, example_of,
+                         implements, replaces, used_by.
+        """
+        check_rate_limit()
+        from nexus.session.concepts import (
+            upsert_concept, link_concepts, attach_concept_to_file,
+            attach_concept_to_symbol, get_concept_neighbors, list_concepts,
+            delete_concept, format_concept_graph, VALID_KINDS, VALID_RELATIONS,
+        )
+
+        db = get_db()
+        tracker = get_tracker()
+
+        try:
+            if action == "upsert":
+                if not name or not summary:
+                    return "upsert requires name and summary"
+                cid = upsert_concept(
+                    db, name=name, summary=summary, kind=kind,
+                    body=body or None, confidence=confidence,
+                    session_id=tracker.session_id,
+                )
+                return f"Concept #{cid} upserted: {name} ({kind}, confidence={confidence:.2f})"
+
+            if action == "link":
+                if not name or not target:
+                    return "link requires name (source) and target"
+                eid = link_concepts(db, name, target, relation=relation, weight=weight)
+                return f"Edge #{eid}: {name} --[{relation}]--> {target} (w={weight:.2f})"
+
+            if action == "attach_file":
+                if not name or not file:
+                    return "attach_file requires name and file"
+                ok = attach_concept_to_file(db, name, file, weight=weight)
+                return (f"Attached {name} → {file}" if ok
+                        else f"Failed: concept '{name}' or file '{file}' not found")
+
+            if action == "attach_symbol":
+                if not name or not symbol:
+                    return "attach_symbol requires name and symbol (qualified name)"
+                ok = attach_concept_to_symbol(db, name, symbol, weight=weight)
+                return (f"Attached {name} → {symbol}" if ok
+                        else f"Failed: concept '{name}' or symbol '{symbol}' not found")
+
+            if action == "view":
+                if not name:
+                    return "view requires name"
+                graph = get_concept_neighbors(db, name, depth=1, max_nodes=20)
+                return format_concept_graph(graph)
+
+            if action == "list":
+                concepts = list_concepts(db, kind=kind if kind != "concept" else None, limit=50)
+                if not concepts:
+                    return "No concepts found. Use action='upsert' to create one."
+                lines = [f"## Concepts ({len(concepts)})"]
+                for c in concepts:
+                    lines.append(
+                        f"  [{c['kind']:12s}] {c['name']:30s} — {c['summary'][:80]}"
+                    )
+                return "\n".join(lines)
+
+            if action == "delete":
+                if not name:
+                    return "delete requires name"
+                ok = delete_concept(db, name)
+                return (f"Deleted concept: {name}" if ok
+                        else f"Concept '{name}' not found")
+
+            return (
+                f"Unknown action '{action}'. Valid: upsert, link, attach_file, "
+                f"attach_symbol, view, list, delete.\n"
+                f"Kinds: {sorted(VALID_KINDS)}\n"
+                f"Relations: {sorted(VALID_RELATIONS)}"
+            )
+        except ValueError as e:
+            return f"Error: {e}"
+
+    # ========================================================================
+    # Semantic edits: extract, inline, move (Serena-inspired)
+    # ========================================================================
+
+    @mcp.tool()
+    def nexus_extract(
+        file: str,
+        start_line: int,
+        end_line: int,
+        new_name: str,
+        dry_run: bool = True,
+    ) -> str:
+        """Extract a block of code into a new function. Multi-language.
+
+        Hoists the given 1-indexed line range into a new top-level function
+        named `new_name` and replaces the block with a call. Captures are
+        NOT auto-computed — the agent must review the preview and fix any
+        variables that should be parameters.
+
+        Args:
+            file: Relative file path.
+            start_line, end_line: 1-indexed inclusive range to extract.
+            new_name: Name for the new function (valid identifier).
+            dry_run: If True (default), return the diff without writing.
+        """
+        check_rate_limit()
+        from nexus.refactor.semantic_edit import extract_block
+
+        db = get_db()
+        config = get_config()
+        lang = config.languages[0] if config.languages else "python"
+
+        result = extract_block(
+            db, config.root, file=file,
+            start_line=start_line, end_line=end_line,
+            new_name=new_name, language=lang, dry_run=dry_run,
+        )
+        return _format_edit_result("extract", result, dry_run)
+
+    @mcp.tool()
+    def nexus_inline(
+        symbol: str,
+        dry_run: bool = True,
+    ) -> str:
+        """Inline a small Python helper by substituting its body at callsites.
+
+        Only works for Python functions whose entire body is a single
+        `return <expr>` statement. Unsafe helpers are refused explicitly.
+        The inlined call sites are marked with a TODO comment so the agent
+        can verify each replacement.
+
+        Args:
+            symbol: Name of the function to inline.
+            dry_run: If True (default), return the diff without writing.
+        """
+        check_rate_limit()
+        from nexus.refactor.semantic_edit import inline_symbol
+
+        db = get_db()
+        config = get_config()
+        result = inline_symbol(db, config.root, symbol, dry_run=dry_run)
+        return _format_edit_result("inline", result, dry_run)
+
+    @mcp.tool()
+    def nexus_lsp(
+        action: str,
+        file: str,
+        line: int,
+        column: int = 0,
+    ) -> str:
+        """Compiler-accurate lookups via LSP backend (Python: jedi).
+
+        Unlike nexus_symbols (structural, fast, multi-language), this tool
+        resolves symbols through the actual import graph. Use it when you
+        need type-accurate answers, not just name-matching.
+
+        Actions:
+          - "definition": jump to where a symbol is defined (follows imports).
+          - "references": find every use-site of the symbol under the cursor.
+          - "signatures": show the callable signatures at this position.
+          - "infer":      infer the type of the expression here.
+
+        Args:
+            action: One of: definition, references, signatures, infer.
+            file:   Relative path to the source file.
+            line:   1-based line number of the cursor.
+            column: 0-based column of the cursor (default 0 = start of line).
+        """
+        check_rate_limit()
+        from nexus.refactor.lsp import (
+            format_lsp_result, goto_definition, find_references,
+            get_signatures, infer_type,
+        )
+
+        config = get_config()
+        lang = config.languages[0] if config.languages else "python"
+
+        dispatch = {
+            "definition": goto_definition,
+            "references": find_references,
+            "signatures": get_signatures,
+            "infer": infer_type,
+        }
+        fn = dispatch.get(action)
+        if not fn:
+            return (
+                f"Unknown action '{action}'. Valid: "
+                f"{', '.join(sorted(dispatch))}"
+            )
+
+        result = fn(config.root, file=file, line=line, column=column, language=lang)
+        return format_lsp_result(result)
+
+    @mcp.tool()
+    def nexus_move(
+        symbol: str,
+        target_file: str,
+        update_imports: bool = True,
+        dry_run: bool = True,
+    ) -> str:
+        """Move a symbol to a different file. Multi-language.
+
+        Cuts the symbol's full line range from its current file and appends
+        it to `target_file` (creating it if needed). For Python, imports
+        can be refreshed with a follow-up `nexus_rename` call. Other
+        languages require manual import fixup — flagged in the preview.
+
+        Args:
+            symbol: Name of the symbol to move.
+            target_file: Relative path of the destination file.
+            update_imports: Add a note about import fixup (default True).
+            dry_run: If True (default), return the diff without writing.
+        """
+        check_rate_limit()
+        from nexus.refactor.semantic_edit import move_symbol
+
+        db = get_db()
+        config = get_config()
+        result = move_symbol(
+            db, config.root, symbol, target_file,
+            update_imports=update_imports, dry_run=dry_run,
+        )
+        return _format_edit_result("move", result, dry_run)

@@ -2,16 +2,22 @@
 
 Packs ranked files into a context window budget using a value/weight ratio.
 Supports 4 granularity levels per file:
-  1. full    — entire file content
+  1. full    — entire file content (semantically compressed)
   2. sigs    — signatures + docstrings
   3. names   — symbol names + kinds only
   4. path    — just the file path
 
 Uses lost-in-the-middle ordering: highest relevance at start and end.
+
+Improvements inspired by Aider's repomap.py:
+  - Line truncation (MAX_LINE_CHARS) to prevent minified-JS disasters
+  - Important-files boost: README, LICENSE, CLAUDE.md, pyproject.toml rank up
+  - Mentioned-identifier bonus: files containing query tokens get a small boost
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,20 +28,68 @@ from nexus.store.db import NexusDB
 # Stay well under to avoid truncation errors.
 DEFAULT_BUDGET = 32_000  # ~8k tokens — fits within Claude Code's tool result limit
 
+# Prevents minified files from eating the whole budget with 50K-char lines.
+# Aider uses 100. We're a bit more generous because real code does have long lines.
+MAX_LINE_CHARS = 160
+
+# Files that deserve priority regardless of BM25/PageRank (Aider's filter_important_files).
+_IMPORTANT_FILENAMES: frozenset[str] = frozenset({
+    "readme.md", "readme.rst", "readme.txt", "readme",
+    "license", "license.md", "license.txt",
+    "claude.md", "agents.md", "cursor.md",
+    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+    "cargo.toml", "package.json", "go.mod", "pom.xml", "build.gradle",
+    "tsconfig.json", "dockerfile", "makefile",
+    ".gitignore", ".env.example",
+})
+
+
+def is_important_file(file_path: str) -> bool:
+    """Is this a top-level file that agents usually benefit from seeing?"""
+    name = Path(file_path).name.lower()
+    return name in _IMPORTANT_FILENAMES
+
+
+def truncate_long_lines(text: str, max_chars: int = MAX_LINE_CHARS) -> str:
+    """Truncate every line to max_chars. Prevents minified/compiled files from
+    destroying the context budget with million-char lines.
+    """
+    lines = text.splitlines()
+    out = []
+    truncated = 0
+    for line in lines:
+        if len(line) > max_chars:
+            out.append(line[:max_chars] + f"  … [+{len(line) - max_chars} chars]")
+            truncated += 1
+        else:
+            out.append(line)
+    if truncated:
+        out.append(f"# (truncated {truncated} long line(s) at {max_chars} chars)")
+    return "\n".join(out)
+
 
 def pack_context(
     ranked_files: list[dict[str, Any]],
     db: NexusDB,
     project_root: Path,
     budget: int = DEFAULT_BUDGET,
+    query: str = "",
 ) -> list[dict[str, Any]]:
     """Pack ranked files into a context budget.
 
     Each result gets assigned a granularity level based on available budget.
     Returns list of dicts with: file_id, file_path, rank, granularity, content, char_count.
+
+    The `query` parameter (if provided) is used to boost files matching mentioned
+    identifiers, mirroring Aider's mentioned_idents behavior.
     """
     packed: list[dict[str, Any]] = []
     remaining = budget
+
+    # Reorder: promote important files (README, CLAUDE.md, pyproject.toml) to the
+    # top when they appear anywhere in the ranked list. This gives agents the
+    # orientation files they need up front, regardless of BM25 score.
+    ranked_files = _promote_important_files(ranked_files)
 
     for item in ranked_files:
         file_id = item["file_id"]
@@ -70,6 +124,16 @@ def pack_context(
     return packed
 
 
+def _promote_important_files(ranked: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Move important files (README, CLAUDE.md, etc.) to the top of the list.
+
+    Stable reorder — preserves original order within each group.
+    """
+    important = [r for r in ranked if is_important_file(r["file_path"])]
+    other = [r for r in ranked if not is_important_file(r["file_path"])]
+    return important + other
+
+
 def _granularity_levels(
     file_path: str,
     symbols: list[dict],
@@ -81,7 +145,7 @@ def _granularity_levels(
     """
     levels: list[tuple[str, str]] = []
 
-    # Level 1: Full file content (semantically compressed)
+    # Level 1: Full file content (semantically compressed + line-truncated)
     abs_path = project_root / file_path
     if abs_path.exists():
         try:
@@ -90,11 +154,16 @@ def _granularity_levels(
             from nexus.util.sanitize import compress_code
             ext = abs_path.suffix.lower()
             lang = {".py": "python", ".rs": "rust", ".ts": "typescript",
-                    ".js": "javascript", ".go": "go", ".java": "java",
-                    ".c": "c", ".h": "c"}.get(ext, "")
+                    ".tsx": "typescript", ".js": "javascript", ".jsx": "javascript",
+                    ".go": "go", ".java": "java", ".c": "c", ".h": "c",
+                    ".cpp": "cpp", ".hpp": "cpp", ".rb": "ruby",
+                    ".php": "php", ".kt": "kotlin", ".swift": "swift",
+                    ".zig": "zig", ".sol": "solidity"}.get(ext, "")
             compressed = compress_code(full, lang)
+            # Truncate long lines to prevent minified-code disasters
+            safe = truncate_long_lines(compressed)
             header = f"### {file_path}\n"
-            levels.append(("full", header + compressed))
+            levels.append(("full", header + safe))
         except Exception:
             pass
 

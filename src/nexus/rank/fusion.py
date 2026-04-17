@@ -16,13 +16,14 @@ from typing import Any
 _RRF_K = 60  # Standard RRF constant
 
 # Default RRF signal weights (overridden by auto-tuner)
-_DEFAULT_RRF_WEIGHTS = {"bm25": 1.0, "pagerank": 1.0, "recency": 1.0}
+_DEFAULT_RRF_WEIGHTS = {"bm25": 1.0, "pagerank": 1.0, "recency": 1.0, "embed": 0.7}
 
 
 def fuse_rankings(
     bm25_results: list[dict[str, Any]],
     pagerank_results: list[dict[str, Any]],
     recency_results: list[dict[str, Any]] | None = None,
+    embed_results: list[dict[str, Any]] | None = None,
     top_k: int = 20,
     rrf_weights: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
@@ -30,6 +31,9 @@ def fuse_rankings(
 
     Each input is a list of dicts with at minimum: file_id, rank.
     BM25 results also carry: file_path, score.
+    `embed_results` is an optional semantic-similarity ranking (fastembed);
+    weighted lower by default since it's query-dependent but less precise
+    on code identifiers than BM25.
 
     Returns merged results sorted by fused score, with per-signal breakdowns.
     """
@@ -37,6 +41,7 @@ def fuse_rankings(
     w_bm25 = w.get("bm25", 1.0)
     w_pr = w.get("pagerank", 1.0)
     w_recency = w.get("recency", 1.0)
+    w_embed = w.get("embed", 0.7)
 
     scores: dict[int, dict[str, Any]] = {}
 
@@ -93,6 +98,27 @@ def fuse_rankings(
                 }
             scores[fid]["rrf_score"] += w_recency / (_RRF_K + item["rank"])
             scores[fid]["recency_rank"] = item["rank"]
+
+    # Embedding signal (optional, requires fastembed)
+    if embed_results:
+        for item in embed_results:
+            fid = item["file_id"]
+            if fid not in scores:
+                scores[fid] = {
+                    "file_id": fid,
+                    "file_path": item.get("file_path", ""),
+                    "rrf_score": 0.0,
+                    "bm25_rank": None,
+                    "pr_rank": None,
+                    "recency_rank": None,
+                    "embed_rank": None,
+                    "bm25_score": 0.0,
+                    "pr_score": 0.0,
+                    "embed_score": 0.0,
+                }
+            scores[fid]["rrf_score"] += w_embed / (_RRF_K + item["rank"])
+            scores[fid]["embed_rank"] = item["rank"]
+            scores[fid]["embed_score"] = item.get("score", 0.0)
 
     # Sort by fused score
     ranked = sorted(scores.values(), key=lambda x: x["rrf_score"], reverse=True)

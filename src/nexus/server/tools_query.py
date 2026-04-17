@@ -745,3 +745,49 @@ def register(mcp):
             f"Feedback recorded: {len(file_list)} files marked as relevant for '{query}'.\n"
             "This will improve ranking for future queries on this project."
         )
+
+    @mcp.tool()
+    def nexus_explore(
+        query: str,
+        seeds: int = 5,
+        hops: int = 2,
+        max_expanded: int = 30,
+    ) -> str:
+        """Multi-hop graph exploration from BM25 seeds (RLM-inspired).
+
+        Instead of single-shot BM25 retrieval, this tool:
+          1. Picks top-N BM25 seeds for the query.
+          2. Walks the symbol-edge graph outward by `hops`.
+          3. Re-ranks discovered files with BM25 to surface indirect matches.
+
+        Use this when you need to understand a code neighborhood — callers,
+        callees, and related files — not just the direct hits. Good for
+        tracing data flow, impact analysis, and "where else is X used".
+
+        Args:
+            query: What you're exploring (e.g. "auth middleware").
+            seeds: Number of BM25 seed files to start from (default 5).
+            hops: Graph traversal depth (default 2, max 3 recommended).
+            max_expanded: Cap on total files returned (default 30).
+        """
+        check_rate_limit()
+        from nexus.rank.explore import explore, format_exploration
+
+        db = get_db()
+        tracker = get_tracker()
+        tracker.log_query(f"[explore] {query}")
+
+        bm25, _pr = ensure_ranking(db)
+
+        result = explore(
+            db, bm25, query,
+            seeds=seeds,
+            hops=max(0, min(hops, 3)),  # cap hops at 3 to bound cost
+            max_expanded=max_expanded,
+        )
+        text = format_exploration(result)
+
+        from nexus.util.sanitize import annotate_injections
+        text = annotate_injections(text)
+        track_token_usage(len(text), "nexus_explore")
+        return text

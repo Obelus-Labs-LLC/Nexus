@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from typing import Generator
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-_CURRENT_VERSION = 4  # Bump when schema changes
+_CURRENT_VERSION = 5  # Bump when schema changes
 
 # Migration functions: version -> callable
 # Each migration takes a connection and upgrades FROM (version-1) TO (version).
@@ -47,6 +47,49 @@ _MIGRATIONS: dict[int, str] = {
         );
         CREATE INDEX IF NOT EXISTS idx_cross_edges_source ON cross_project_edges(source_project);
         CREATE INDEX IF NOT EXISTS idx_cross_edges_target ON cross_project_edges(target_project);
+    """,
+    5: """
+        -- Concept graph (MegaMemory-inspired): long-lived knowledge beyond 7-day decisions.
+        CREATE TABLE IF NOT EXISTS concepts (
+            id          INTEGER PRIMARY KEY,
+            name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            kind        TEXT NOT NULL DEFAULT 'concept',
+            summary     TEXT NOT NULL,
+            body        TEXT,
+            confidence  REAL NOT NULL DEFAULT 0.5,
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL,
+            session_id  TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_concepts_kind ON concepts(kind);
+        CREATE INDEX IF NOT EXISTS idx_concepts_name ON concepts(name COLLATE NOCASE);
+        CREATE TABLE IF NOT EXISTS concept_edges (
+            id          INTEGER PRIMARY KEY,
+            source_id   INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+            target_id   INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+            relation    TEXT NOT NULL DEFAULT 'related_to',
+            weight      REAL NOT NULL DEFAULT 1.0,
+            created_at  REAL NOT NULL,
+            UNIQUE(source_id, target_id, relation)
+        );
+        CREATE INDEX IF NOT EXISTS idx_concept_edges_source ON concept_edges(source_id);
+        CREATE INDEX IF NOT EXISTS idx_concept_edges_target ON concept_edges(target_id);
+        CREATE TABLE IF NOT EXISTS concept_files (
+            concept_id  INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+            file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+            weight      REAL NOT NULL DEFAULT 1.0,
+            PRIMARY KEY(concept_id, file_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_concept_files_concept ON concept_files(concept_id);
+        CREATE INDEX IF NOT EXISTS idx_concept_files_file ON concept_files(file_id);
+        CREATE TABLE IF NOT EXISTS concept_symbols (
+            concept_id  INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+            symbol_id   INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+            weight      REAL NOT NULL DEFAULT 1.0,
+            PRIMARY KEY(concept_id, symbol_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_concept_symbols_concept ON concept_symbols(concept_id);
+        CREATE INDEX IF NOT EXISTS idx_concept_symbols_symbol ON concept_symbols(symbol_id);
     """,
 }
 

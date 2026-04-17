@@ -17,6 +17,13 @@ _LANG_GRAMMAR: dict[str, str] = {
     "c": "c",
     "go": "go",
     "java": "java",
+    # Extended language coverage (pitlane-mcp parity)
+    "ruby": "ruby",
+    "php": "php",
+    "kotlin": "kotlin",
+    "swift": "swift",
+    "zig": "zig",
+    "solidity": "solidity",
 }
 
 
@@ -814,10 +821,618 @@ def _c_function(node: Any, source: bytes, module: str) -> Symbol:
 # Extractor registry
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Ruby extractor
+# ---------------------------------------------------------------------------
+
+def _extract_ruby(root: Any, source: bytes, path: Path) -> ParseResult:
+    """Extract symbols from Ruby."""
+    result = ParseResult()
+    module_name = path.stem
+
+    def walk(node: Any, parent: str) -> None:
+        for child in node.children:
+            if child.type == "class":
+                name = _child_text(child, "name", source)
+                if not name:
+                    # fallback: find first constant
+                    for c in child.children:
+                        if c.type == "constant":
+                            name = _node_text(c, source)
+                            break
+                if name:
+                    qual = f"{parent}::{name}" if parent else name
+                    result.symbols.append(Symbol(
+                        name=name, qualified=qual, kind="class",
+                        line_start=child.start_point[0] + 1,
+                        line_end=child.end_point[0] + 1,
+                        signature=f"class {name}",
+                        body_text=_node_text(child, source),
+                    ))
+                    # Recurse into class body for methods
+                    body = _child_by_type(child, "body_statement")
+                    if body:
+                        walk(body, qual)
+            elif child.type == "module":
+                name = _child_text(child, "name", source)
+                if not name:
+                    for c in child.children:
+                        if c.type == "constant":
+                            name = _node_text(c, source)
+                            break
+                if name:
+                    qual = f"{parent}::{name}" if parent else name
+                    result.symbols.append(Symbol(
+                        name=name, qualified=qual, kind="module",
+                        line_start=child.start_point[0] + 1,
+                        line_end=child.end_point[0] + 1,
+                        signature=f"module {name}",
+                        body_text=_node_text(child, source),
+                    ))
+                    body = _child_by_type(child, "body_statement")
+                    if body:
+                        walk(body, qual)
+            elif child.type in ("method", "singleton_method"):
+                name = _child_text(child, "name", source)
+                if name:
+                    params = _child_by_type(child, "method_parameters") or _child_by_type(child, "parameters")
+                    sig = f"def {name}"
+                    if params:
+                        sig += _node_text(params, source)
+                    qual = f"{parent}.{name}" if parent else name
+                    kind = "method" if parent else "function"
+                    result.symbols.append(Symbol(
+                        name=name, qualified=qual, kind=kind,
+                        line_start=child.start_point[0] + 1,
+                        line_end=child.end_point[0] + 1,
+                        signature=sig,
+                        body_text=_node_text(child, source),
+                        visibility="private" if name.startswith("_") else "public",
+                    ))
+            elif child.type == "call":
+                # require "foo" / require_relative "foo"
+                method = _child_text(child, "method", source)
+                if method in ("require", "require_relative", "load"):
+                    args = _child_by_type(child, "argument_list")
+                    if args:
+                        for arg in args.children:
+                            if arg.type == "string":
+                                mod = _node_text(arg, source).strip("\"'")
+                                if mod:
+                                    result.imports.append(Import(
+                                        module=mod, names=[],
+                                        line=child.start_point[0] + 1,
+                                        is_from=(method == "require_relative"),
+                                    ))
+
+    walk(root, module_name)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# PHP extractor
+# ---------------------------------------------------------------------------
+
+def _extract_php(root: Any, source: bytes, path: Path) -> ParseResult:
+    """Extract symbols from PHP."""
+    result = ParseResult()
+    module_name = path.stem
+
+    def process_node(node: Any, parent: str) -> None:
+        if node.type == "class_declaration":
+            name = _child_text(node, "name", source)
+            if not name:
+                for c in node.children:
+                    if c.type == "name":
+                        name = _node_text(c, source)
+                        break
+            qual = f"{parent}\\{name}" if name else parent
+            if name:
+                result.symbols.append(Symbol(
+                    name=name, qualified=qual, kind="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=f"class {name}",
+                    body_text=_node_text(node, source),
+                ))
+                body = _child_by_type(node, "declaration_list")
+                if body:
+                    for member in body.children:
+                        if member.type == "method_declaration":
+                            mname = _child_text(member, "name", source)
+                            if not mname:
+                                for c in member.children:
+                                    if c.type == "name":
+                                        mname = _node_text(c, source)
+                                        break
+                            if not mname:
+                                continue
+                            mparams = _child_by_type(member, "formal_parameters")
+                            msig = f"function {mname}"
+                            if mparams:
+                                msig += _node_text(mparams, source)
+                            # Detect visibility modifier (public/private/protected)
+                            mvis = "public"
+                            for c in member.children:
+                                if c.type == "visibility_modifier":
+                                    vtext = _node_text(c, source).lower()
+                                    if vtext in ("private", "protected"):
+                                        mvis = vtext
+                                    break
+                            result.symbols.append(Symbol(
+                                name=mname,
+                                qualified=f"{qual}\\{mname}",
+                                kind="method",
+                                line_start=member.start_point[0] + 1,
+                                line_end=member.end_point[0] + 1,
+                                signature=msig,
+                                body_text=_node_text(member, source),
+                                visibility=mvis,
+                            ))
+        elif node.type == "interface_declaration":
+            name = _child_text(node, "name", source)
+            if not name:
+                for c in node.children:
+                    if c.type == "name":
+                        name = _node_text(c, source)
+                        break
+            if name:
+                result.symbols.append(Symbol(
+                    name=name, qualified=f"{parent}\\{name}", kind="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=f"interface {name}",
+                    body_text=_node_text(node, source),
+                ))
+        elif node.type == "function_definition":
+            name = _child_text(node, "name", source)
+            if not name:
+                for c in node.children:
+                    if c.type == "name":
+                        name = _node_text(c, source)
+                        break
+            if name:
+                params = _child_by_type(node, "formal_parameters")
+                sig = f"function {name}"
+                if params:
+                    sig += _node_text(params, source)
+                result.symbols.append(Symbol(
+                    name=name, qualified=f"{parent}\\{name}", kind="function",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=sig,
+                    body_text=_node_text(node, source),
+                ))
+        elif node.type == "namespace_definition":
+            ns_name = ""
+            for c in node.children:
+                if c.type in ("namespace_name", "qualified_name"):
+                    ns_name = _node_text(c, source)
+                    break
+            new_parent = ns_name or parent
+            body = _child_by_type(node, "compound_statement") or _child_by_type(node, "declaration_list")
+            if body:
+                for child in body.children:
+                    process_node(child, new_parent)
+            else:
+                # bare namespace: remaining top-level items belong to it
+                pass
+        elif node.type == "namespace_use_declaration":
+            text = _node_text(node, source)
+            # use Foo\Bar; or use Foo\{Bar, Baz};
+            stripped = text.replace("use ", "").rstrip(";").strip()
+            result.imports.append(Import(
+                module=stripped, names=[],
+                line=node.start_point[0] + 1,
+                is_from=True,
+            ))
+
+    for child in root.children:
+        process_node(child, module_name)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Kotlin extractor
+# ---------------------------------------------------------------------------
+
+def _extract_kotlin(root: Any, source: bytes, path: Path) -> ParseResult:
+    """Extract symbols from Kotlin."""
+    result = ParseResult()
+    module_name = path.stem
+
+    def find_name(node: Any) -> str:
+        for c in node.children:
+            if c.type in ("simple_identifier", "type_identifier"):
+                return _node_text(c, source)
+        return ""
+
+    for node in root.children:
+        if node.type == "class_declaration":
+            name = find_name(node)
+            if name:
+                result.symbols.append(Symbol(
+                    name=name, qualified=f"{module_name}.{name}", kind="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=f"class {name}",
+                    body_text=_node_text(node, source),
+                ))
+                # Extract member functions
+                body = _child_by_type(node, "class_body")
+                if body:
+                    for member in body.children:
+                        if member.type == "function_declaration":
+                            mname = find_name(member)
+                            if mname:
+                                params = _child_by_type(member, "function_value_parameters")
+                                sig = f"fun {mname}"
+                                if params:
+                                    sig += _node_text(params, source)
+                                result.symbols.append(Symbol(
+                                    name=mname,
+                                    qualified=f"{module_name}.{name}.{mname}",
+                                    kind="method",
+                                    line_start=member.start_point[0] + 1,
+                                    line_end=member.end_point[0] + 1,
+                                    signature=sig,
+                                    body_text=_node_text(member, source),
+                                ))
+        elif node.type == "function_declaration":
+            name = find_name(node)
+            if name:
+                params = _child_by_type(node, "function_value_parameters")
+                sig = f"fun {name}"
+                if params:
+                    sig += _node_text(params, source)
+                result.symbols.append(Symbol(
+                    name=name, qualified=f"{module_name}.{name}", kind="function",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=sig,
+                    body_text=_node_text(node, source),
+                ))
+        elif node.type == "object_declaration":
+            name = find_name(node)
+            if name:
+                result.symbols.append(Symbol(
+                    name=name, qualified=f"{module_name}.{name}", kind="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=f"object {name}",
+                    body_text=_node_text(node, source),
+                ))
+        elif node.type == "import_list":
+            for imp in node.children:
+                if imp.type == "import_header":
+                    text = _node_text(imp, source).replace("import ", "").strip(";").strip()
+                    if text:
+                        result.imports.append(Import(
+                            module=text, names=[],
+                            line=imp.start_point[0] + 1,
+                            is_from=False,
+                        ))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Swift extractor
+# ---------------------------------------------------------------------------
+
+def _extract_swift(root: Any, source: bytes, path: Path) -> ParseResult:
+    """Extract symbols from Swift."""
+    result = ParseResult()
+    module_name = path.stem
+
+    def find_name(node: Any) -> str:
+        for c in node.children:
+            if c.type in ("type_identifier", "simple_identifier", "identifier"):
+                return _node_text(c, source)
+        return ""
+
+    def extract_members(body: Any, parent_qual: str) -> None:
+        for member in body.children:
+            if member.type == "function_declaration":
+                mname = find_name(member)
+                if mname:
+                    params = None
+                    for c in member.children:
+                        if c.type == "parameter_clause" or c.type.endswith("parameters"):
+                            params = c
+                            break
+                    sig = f"func {mname}"
+                    if params:
+                        sig += _node_text(params, source)
+                    result.symbols.append(Symbol(
+                        name=mname,
+                        qualified=f"{parent_qual}.{mname}",
+                        kind="method",
+                        line_start=member.start_point[0] + 1,
+                        line_end=member.end_point[0] + 1,
+                        signature=sig,
+                        body_text=_node_text(member, source),
+                    ))
+
+    for node in root.children:
+        if node.type == "class_declaration":
+            name = find_name(node)
+            if name:
+                # Determine struct/class/actor/enum from keyword
+                keyword = "class"
+                for c in node.children:
+                    if c.type in ("class", "struct", "actor", "enum"):
+                        keyword = c.type
+                        break
+                qual = f"{module_name}.{name}"
+                result.symbols.append(Symbol(
+                    name=name, qualified=qual, kind="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=f"{keyword} {name}",
+                    body_text=_node_text(node, source),
+                ))
+                # Extract methods
+                for child in node.children:
+                    if child.type in ("class_body", "declaration_list"):
+                        extract_members(child, qual)
+        elif node.type == "protocol_declaration":
+            name = find_name(node)
+            if name:
+                result.symbols.append(Symbol(
+                    name=name, qualified=f"{module_name}.{name}", kind="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=f"protocol {name}",
+                    body_text=_node_text(node, source),
+                ))
+        elif node.type == "function_declaration":
+            name = find_name(node)
+            if name:
+                sig = f"func {name}"
+                for c in node.children:
+                    if c.type == "parameter_clause" or c.type.endswith("parameters"):
+                        sig += _node_text(c, source)
+                        break
+                result.symbols.append(Symbol(
+                    name=name, qualified=f"{module_name}.{name}", kind="function",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=sig,
+                    body_text=_node_text(node, source),
+                ))
+        elif node.type == "import_declaration":
+            text = _node_text(node, source).replace("import ", "").strip()
+            if text:
+                result.imports.append(Import(
+                    module=text, names=[],
+                    line=node.start_point[0] + 1,
+                    is_from=False,
+                ))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Zig extractor
+# ---------------------------------------------------------------------------
+
+def _extract_zig(root: Any, source: bytes, path: Path) -> ParseResult:
+    """Extract symbols from Zig."""
+    result = ParseResult()
+    module_name = path.stem
+
+    for node in root.children:
+        if node.type != "Decl":
+            continue
+
+        # Look inside Decl for FnProto or VarDecl
+        for inner in node.children:
+            if inner.type == "FnProto":
+                # Function declaration
+                name = ""
+                for c in inner.children:
+                    if c.type == "IDENTIFIER":
+                        name = _node_text(c, source)
+                        break
+                if name:
+                    result.symbols.append(Symbol(
+                        name=name, qualified=f"{module_name}.{name}", kind="function",
+                        line_start=node.start_point[0] + 1,
+                        line_end=node.end_point[0] + 1,
+                        signature=_node_text(inner, source),
+                        body_text=_node_text(node, source),
+                    ))
+            elif inner.type == "VarDecl":
+                # Could be: const X = struct {...}, const X = enum {...}, const Y = @import("..."), etc.
+                name = ""
+                value_text = ""
+                for c in inner.children:
+                    if c.type == "IDENTIFIER":
+                        name = _node_text(c, source)
+                    elif c.type == "ErrorUnionExpr":
+                        value_text = _node_text(c, source)
+
+                if not name:
+                    continue
+
+                lower = value_text.lower().lstrip()
+                if lower.startswith("@import"):
+                    # Extract module path from @import("foo")
+                    import re as _re
+                    m = _re.search(r'@import\("([^"]+)"\)', value_text)
+                    if m:
+                        result.imports.append(Import(
+                            module=m.group(1), names=[],
+                            line=node.start_point[0] + 1,
+                            is_from=False,
+                        ))
+                elif lower.startswith("struct"):
+                    result.symbols.append(Symbol(
+                        name=name, qualified=f"{module_name}.{name}", kind="class",
+                        line_start=node.start_point[0] + 1,
+                        line_end=node.end_point[0] + 1,
+                        signature=f"const {name} = struct",
+                        body_text=_node_text(node, source),
+                    ))
+                elif lower.startswith("enum"):
+                    result.symbols.append(Symbol(
+                        name=name, qualified=f"{module_name}.{name}", kind="class",
+                        line_start=node.start_point[0] + 1,
+                        line_end=node.end_point[0] + 1,
+                        signature=f"const {name} = enum",
+                        body_text=_node_text(node, source),
+                    ))
+                elif lower.startswith("union"):
+                    result.symbols.append(Symbol(
+                        name=name, qualified=f"{module_name}.{name}", kind="class",
+                        line_start=node.start_point[0] + 1,
+                        line_end=node.end_point[0] + 1,
+                        signature=f"const {name} = union",
+                        body_text=_node_text(node, source),
+                    ))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Solidity extractor
+# ---------------------------------------------------------------------------
+
+def _extract_solidity(root: Any, source: bytes, path: Path) -> ParseResult:
+    """Extract symbols from Solidity."""
+    result = ParseResult()
+    module_name = path.stem
+
+    def find_name(node: Any) -> str:
+        for c in node.children:
+            if c.type == "identifier":
+                return _node_text(c, source)
+        return ""
+
+    def extract_body(container: Any, parent_qual: str) -> None:
+        for member in container.children:
+            if member.type == "function_definition":
+                mname = find_name(member)
+                if mname:
+                    sig = f"function {mname}"
+                    for c in member.children:
+                        if c.type == "parameter":
+                            sig += _node_text(c, source)
+                    result.symbols.append(Symbol(
+                        name=mname,
+                        qualified=f"{parent_qual}.{mname}",
+                        kind="method",
+                        line_start=member.start_point[0] + 1,
+                        line_end=member.end_point[0] + 1,
+                        signature=sig,
+                        body_text=_node_text(member, source),
+                    ))
+            elif member.type == "constructor_definition":
+                result.symbols.append(Symbol(
+                    name="constructor", qualified=f"{parent_qual}.constructor",
+                    kind="method",
+                    line_start=member.start_point[0] + 1,
+                    line_end=member.end_point[0] + 1,
+                    signature="constructor",
+                    body_text=_node_text(member, source),
+                ))
+            elif member.type == "event_definition":
+                mname = find_name(member)
+                if mname:
+                    result.symbols.append(Symbol(
+                        name=mname, qualified=f"{parent_qual}.{mname}",
+                        kind="function",
+                        line_start=member.start_point[0] + 1,
+                        line_end=member.end_point[0] + 1,
+                        signature=f"event {mname}",
+                        body_text=_node_text(member, source),
+                    ))
+            elif member.type == "modifier_definition":
+                mname = find_name(member)
+                if mname:
+                    result.symbols.append(Symbol(
+                        name=mname, qualified=f"{parent_qual}.{mname}",
+                        kind="function",
+                        line_start=member.start_point[0] + 1,
+                        line_end=member.end_point[0] + 1,
+                        signature=f"modifier {mname}",
+                        body_text=_node_text(member, source),
+                    ))
+
+    for node in root.children:
+        if node.type == "contract_declaration":
+            name = find_name(node)
+            if name:
+                qual = f"{module_name}.{name}"
+                result.symbols.append(Symbol(
+                    name=name, qualified=qual, kind="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=f"contract {name}",
+                    body_text=_node_text(node, source),
+                ))
+                body = _child_by_type(node, "contract_body")
+                if body:
+                    extract_body(body, qual)
+        elif node.type == "interface_declaration":
+            name = find_name(node)
+            if name:
+                qual = f"{module_name}.{name}"
+                result.symbols.append(Symbol(
+                    name=name, qualified=qual, kind="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=f"interface {name}",
+                    body_text=_node_text(node, source),
+                ))
+                body = _child_by_type(node, "contract_body")
+                if body:
+                    extract_body(body, qual)
+        elif node.type == "library_declaration":
+            name = find_name(node)
+            if name:
+                qual = f"{module_name}.{name}"
+                result.symbols.append(Symbol(
+                    name=name, qualified=qual, kind="class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=f"library {name}",
+                    body_text=_node_text(node, source),
+                ))
+                body = _child_by_type(node, "contract_body")
+                if body:
+                    extract_body(body, qual)
+        elif node.type == "import_directive":
+            text = _node_text(node, source)
+            # import "./foo.sol";  or  import {X} from "./foo.sol";
+            import re as _re
+            m = _re.search(r'["\']([^"\']+)["\']', text)
+            if m:
+                result.imports.append(Import(
+                    module=m.group(1), names=[],
+                    line=node.start_point[0] + 1,
+                    is_from=False,
+                ))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Extractor registry
+# ---------------------------------------------------------------------------
+
 _EXTRACTORS = {
     "python": _extract_python,
     "rust": _extract_rust,
     "typescript": _extract_typescript,
     "javascript": _extract_typescript,  # same AST structure
     "c": _extract_c,
+    "ruby": _extract_ruby,
+    "php": _extract_php,
+    "kotlin": _extract_kotlin,
+    "swift": _extract_swift,
+    "zig": _extract_zig,
+    "solidity": _extract_solidity,
 }

@@ -125,10 +125,15 @@ class NexusBM25:
         if not corpus_texts:
             return 0
 
-        # Build BM25 index — join pre-tokenized lists into strings for bm25s
+        # Build BM25 index — join pre-tokenized lists into strings for bm25s.
+        # Pass stopwords=None / stemmer=None because our tokenize_code() already
+        # performed careful identifier splitting (camelCase, snake_case, etc.).
+        # bm25s's default tokenizer would drop code-meaningful words like
+        # "is", "the", "and" (from is_valid, the_value, and_gate) and apply
+        # English stemming that garbles identifier tokens.
         self._model = bm25s.BM25()
         corpus_strings = [" ".join(tokens) for tokens in corpus_texts]
-        tokenized = bm25s.tokenize(corpus_strings)
+        tokenized = bm25s.tokenize(corpus_strings, stopwords=None, stemmer=None, show_progress=False)
         self._model.index(tokenized)
         self._dirty = False
 
@@ -154,8 +159,11 @@ class NexusBM25:
 
         k = min(top_k, len(self._file_ids))
         query_string = " ".join(query_tokens)
-        query_tokenized = bm25s.tokenize([query_string])
-        results, scores = self._model.retrieve(query_tokenized, k=k)
+        # Match indexing: preserve our careful tokenization, no stopwords/stemmer
+        query_tokenized = bm25s.tokenize(
+            [query_string], stopwords=None, stemmer=None, show_progress=False
+        )
+        results, scores = self._model.retrieve(query_tokenized, k=k, show_progress=False)
 
         ranked: list[dict[str, Any]] = []
         for rank, (idx, score) in enumerate(zip(results[0], scores[0])):

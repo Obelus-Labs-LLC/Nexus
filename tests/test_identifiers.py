@@ -36,3 +36,42 @@ def test_tokenize_filters_short():
     # Tokens shorter than 2 chars should be filtered
     assert "a" not in tokens
     assert "b" not in tokens
+
+
+# ── Parity tests: match pitlane-mcp's tokenizer expectations ────────────────
+
+def test_lower_instruction_pattern():
+    """pitlane's canonical test case — must split PascalCase."""
+    assert split_identifier("LowerInstruction") == ["lower", "instruction"]
+
+
+def test_kebab_case():
+    assert split_identifier("some-kebab-case") == ["some", "kebab", "case"]
+
+
+def test_dotted_identifier():
+    assert split_identifier("module.ClassName.method") == ["module", "class", "name", "method"]
+
+
+def test_mixed_camel_snake():
+    assert split_identifier("parse_jsonHTTP") == ["parse", "json", "http"]
+
+
+def test_digits_inline():
+    assert split_identifier("item2vec") == ["item", "2", "vec"]
+    assert split_identifier("md5sum") == ["md", "5", "sum"]
+
+
+def test_code_stopwords_preserved():
+    """Code-meaningful stopwords like 'is', 'and', 'or' must survive."""
+    tokens = tokenize_code("is_valid and_then or_else the_value")
+    assert "is" in tokens
+    assert "and" in tokens
+    assert "or" in tokens
+    assert "the" in tokens
+
+
+def test_tokenize_preserves_valid():
+    tokens = tokenize_code("def is_valid(x): return x > 0")
+    assert "is" in tokens
+    assert "valid" in tokens

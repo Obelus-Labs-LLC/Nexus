@@ -128,6 +128,61 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE INDEX IF NOT EXISTS idx_decisions_expires ON decisions(expires_at);
 
 -- =============================================================
+-- CONCEPT GRAPH (MegaMemory-inspired)
+-- =============================================================
+-- Concepts are named nodes in a long-lived knowledge graph: architecture
+-- ideas, design patterns in use, conventions, risks, glossary terms. They
+-- do NOT expire like decisions — they accumulate across sessions and can
+-- be linked to each other and to code symbols.
+CREATE TABLE IF NOT EXISTS concepts (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    kind        TEXT NOT NULL DEFAULT 'concept',  -- concept, pattern, convention, risk, glossary
+    summary     TEXT NOT NULL,                    -- 1–3 sentence description
+    body        TEXT,                             -- optional longer explanation
+    confidence  REAL NOT NULL DEFAULT 0.5,        -- 0..1 — how sure we are
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    session_id  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_concepts_kind ON concepts(kind);
+CREATE INDEX IF NOT EXISTS idx_concepts_name ON concepts(name COLLATE NOCASE);
+
+-- Concept-to-concept edges: builds a traversable graph.
+-- Common relations: related_to, depends_on, contradicts, refines, example_of.
+CREATE TABLE IF NOT EXISTS concept_edges (
+    id          INTEGER PRIMARY KEY,
+    source_id   INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+    target_id   INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+    relation    TEXT NOT NULL DEFAULT 'related_to',
+    weight      REAL NOT NULL DEFAULT 1.0,
+    created_at  REAL NOT NULL,
+    UNIQUE(source_id, target_id, relation)
+);
+CREATE INDEX IF NOT EXISTS idx_concept_edges_source ON concept_edges(source_id);
+CREATE INDEX IF NOT EXISTS idx_concept_edges_target ON concept_edges(target_id);
+
+-- Concept-to-file links: which files embody/implement this concept.
+CREATE TABLE IF NOT EXISTS concept_files (
+    concept_id  INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+    file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    weight      REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY(concept_id, file_id)
+);
+CREATE INDEX IF NOT EXISTS idx_concept_files_concept ON concept_files(concept_id);
+CREATE INDEX IF NOT EXISTS idx_concept_files_file ON concept_files(file_id);
+
+-- Concept-to-symbol links: pin a concept to a specific class/function.
+CREATE TABLE IF NOT EXISTS concept_symbols (
+    concept_id  INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+    symbol_id   INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+    weight      REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY(concept_id, symbol_id)
+);
+CREATE INDEX IF NOT EXISTS idx_concept_symbols_concept ON concept_symbols(concept_id);
+CREATE INDEX IF NOT EXISTS idx_concept_symbols_symbol ON concept_symbols(symbol_id);
+
+-- =============================================================
 -- CROSS-PROJECT EDGES
 -- =============================================================
 CREATE TABLE IF NOT EXISTS cross_project_edges (

@@ -25,6 +25,13 @@ _EXT_TO_LANG: dict[str, str] = {
     ".c": "c", ".h": "c",
     ".go": "go",
     ".java": "java",
+    # Extended language coverage (pitlane-mcp parity)
+    ".rb": "ruby", ".rake": "ruby", ".gemspec": "ruby",
+    ".php": "php", ".phtml": "php",
+    ".kt": "kotlin", ".kts": "kotlin",
+    ".swift": "swift",
+    ".zig": "zig",
+    ".sol": "solidity",
 }
 
 # Patterns for generated/vendored files — deprioritized in ranking

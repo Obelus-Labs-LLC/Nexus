@@ -33,6 +33,7 @@ class TestToolRegistration:
             "nexus_analytics",
             "nexus_summarize",
             "nexus_feedback",
+            "nexus_explore",
             # tools_refactor
             "nexus_rename",
             "nexus_enrich",
@@ -40,6 +41,11 @@ class TestToolRegistration:
             "nexus_diff",
             "nexus_docstring",
             "nexus_remember",
+            "nexus_concept",
+            "nexus_extract",
+            "nexus_inline",
+            "nexus_move",
+            "nexus_lsp",
             # tools_integrations
             "nexus_integrations",
             "nexus_security",
@@ -55,7 +61,7 @@ class TestToolRegistration:
     def test_tool_count(self):
         from nexus.server.mcp import mcp
 
-        assert len(mcp._tool_manager._tools) == 26
+        assert len(mcp._tool_manager._tools) == 32
 
 
 class TestNexusScan:
