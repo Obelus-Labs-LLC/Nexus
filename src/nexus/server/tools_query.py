@@ -95,6 +95,23 @@ def _detect_circular_deps(db) -> str:
         return ""
 
 
+def _estimate_corpus_chars(db) -> int:
+    """Estimate the indexed corpus size in characters.
+
+    Uses ``byte_size`` from the files table as a UTF-8 byte proxy for char
+    count. Returns 0 on any error — the guardrail is best-effort and must
+    never block ``nexus_start``.
+    """
+    try:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(byte_size), 0) AS total FROM files"
+            ).fetchone()
+        return int(row["total"]) if row else 0
+    except Exception:
+        return 0
+
+
 def _background_checks(project_root, db) -> str:
     """Run silent background checks and return only actionable alerts.
 
@@ -194,6 +211,7 @@ def register(mcp):
         languages: str = "python",
         top_k: int = 15,
         budget: int = 16000,
+        model: str = "",
     ) -> str:
         """Mandatory first call. Scans project (if needed), ranks files by relevance,
         and returns packed context with confidence level.
@@ -206,11 +224,18 @@ def register(mcp):
             languages: Comma-separated languages to index (default: "python").
             top_k: Number of top files to return (default: 15).
             budget: Max characters of context to return (default: 16000).
+            model: Optional target model identifier (e.g. "claude-opus-4-7").
+                When set, the budget is scaled by that model's tokenizer factor
+                to compensate for per-model chars-per-token variance.
         """
         check_rate_limit()
         from nexus.index.pipeline import index_project
         from nexus.rank.fusion import compute_confidence, fuse_rankings
-        from nexus.rank.packer import format_packed_context, pack_context
+        from nexus.rank.packer import (
+            budget_scale_for_model,
+            format_packed_context,
+            pack_context,
+        )
         from nexus.session.analytics import log_query_result
         from nexus.session.memory import cleanup_expired, format_decisions, get_active_decisions
 
@@ -260,7 +285,10 @@ def register(mcp):
         )
         confidence = compute_confidence(fused)
 
-        packed = pack_context(fused, db, config.root, budget=budget)
+        model_key = (model or "").strip() or None
+        packed = pack_context(
+            fused, db, config.root, budget=budget, query=query, model=model_key,
+        )
         context = format_packed_context(packed)
 
         result_files = [f["file_path"] for f in fused if "file_path" in f]
@@ -283,6 +311,33 @@ def register(mcp):
             lines.append("Medium confidence: Consider supplementing with 2-3 targeted grep searches.")
         else:
             lines.append("Low confidence: Results may be incomplete. Use grep/read to explore further.")
+
+        # Tokenizer-aware budget note (only shown when the model was specified
+        # and the scale actually shrank the budget).
+        if model_key:
+            scale = budget_scale_for_model(model_key)
+            if scale < 1.0:
+                effective = int(budget * scale)
+                lines.append(
+                    f"Model `{model_key}` tokenizer scale: {scale:.2f}×. "
+                    f"Effective budget: {effective:,} chars (of {budget:,} requested)."
+                )
+
+        # Long-context guardrail: Claude Opus 4.7 retrieval accuracy drops
+        # sharply past ~128K tokens (see MRCR benchmark, research report §4).
+        # When the indexed corpus is large enough that fetching many files
+        # could easily push past that cliff, warn the agent to prefer
+        # narrower follow-up calls rather than bulk reads.
+        corpus_chars = _estimate_corpus_chars(db)
+        # 128K tokens ≈ 400K chars conservatively. Warn at half that so we
+        # catch the risky zone before the cliff, not after.
+        if corpus_chars > 200_000:
+            est_tokens_k = corpus_chars // 4000
+            lines.append(
+                f"Long-context guardrail: indexed corpus ≈ {corpus_chars // 1000}K chars "
+                f"(~{est_tokens_k}K tokens). Prefer targeted `nexus_retrieve` / `nexus_read` "
+                f"calls over bulk file reads — accuracy degrades past ~128K tokens of context."
+            )
 
         # Inject circular dependency alert if cycles exist in project
         cycle_alert = _detect_circular_deps(db)
@@ -318,6 +373,7 @@ def register(mcp):
         query: str,
         top_k: int = 20,
         budget: int = 16000,
+        model: str = "",
     ) -> str:
         """Query the graph for relevant files using BM25 + PageRank + RRF fusion.
 
@@ -327,7 +383,9 @@ def register(mcp):
         Args:
             query: Search query (natural language or code identifiers).
             top_k: Number of results (default: 20).
-            budget: Max characters of context (default: 32000).
+            budget: Max characters of context (default: 16000).
+            model: Optional target model identifier (e.g. "claude-opus-4-7").
+                When set, the budget is scaled by that model's tokenizer factor.
         """
         check_rate_limit()
         from nexus.rank.fusion import compute_confidence, fuse_rankings
@@ -363,7 +421,10 @@ def register(mcp):
         )
         confidence = compute_confidence(fused)
 
-        packed = pack_context(fused, db, config.root, budget=budget)
+        model_key = (model or "").strip() or None
+        packed = pack_context(
+            fused, db, config.root, budget=budget, query=query, model=model_key,
+        )
         context = format_packed_context(packed)
 
         lines = [

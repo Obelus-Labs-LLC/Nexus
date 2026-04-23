@@ -2,6 +2,7 @@
 
 from nexus.rank.packer import (
     MAX_LINE_CHARS,
+    budget_scale_for_model,
     is_important_file,
     truncate_long_lines,
     _promote_important_files,
@@ -103,3 +104,120 @@ class TestPromoteImportantFiles:
         ]
         out = _promote_important_files(ranked)
         assert out == ranked
+
+
+class TestBudgetScale:
+    """Tokenizer-aware budget compensation for newer Claude models (4.7+)."""
+
+    def test_unknown_model_no_scaling(self):
+        assert budget_scale_for_model(None) == 1.0
+        assert budget_scale_for_model("") == 1.0
+        assert budget_scale_for_model("gpt-5-turbo") == 1.0
+
+    def test_opus_4_7_scales_down(self):
+        # Any recognisable 4.7 variant triggers the 0.75 scale.
+        assert budget_scale_for_model("claude-opus-4-7") == 0.75
+        assert budget_scale_for_model("claude-opus-4.7") == 0.75
+        assert budget_scale_for_model("opus-4.7") == 0.75
+        assert budget_scale_for_model("opus-4-7") == 0.75
+
+    def test_opus_4_7_fuzzy_match(self):
+        # Variants with full Anthropic prefixes or suffixes still match.
+        assert budget_scale_for_model("claude-3-opus-4-7-preview") == 0.75
+        assert budget_scale_for_model("CLAUDE-OPUS-4.7") == 0.75
+
+    def test_opus_4_6_unchanged(self):
+        assert budget_scale_for_model("claude-opus-4-6") == 1.0
+        assert budget_scale_for_model("opus-4.6") == 1.0
+
+    def test_sonnet_and_haiku_unchanged(self):
+        assert budget_scale_for_model("claude-sonnet-4-5") == 1.0
+        assert budget_scale_for_model("claude-haiku-4-5") == 1.0
+
+
+class TestPackContextBudgetScale:
+    """pack_context must honour model/budget_scale params without regressions."""
+
+    def test_explicit_scale_shrinks_budget(self, tmp_path):
+        from nexus.rank.packer import pack_context
+        from nexus.store.db import NexusDB
+
+        # Create a minimal project with one real file so pack_context can read it.
+        src = tmp_path / "big.py"
+        # Write ~10K chars so the budget is the binding constraint.
+        src.write_text("# comment line\n" * 800)
+
+        db = NexusDB(tmp_path / ".nexus" / "nexus.db")
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO files (path, sha256, language, line_count, byte_size, last_parsed) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("big.py", "deadbeef", "python", 800, src.stat().st_size, 0.0),
+            )
+            file_id = conn.execute("SELECT id FROM files WHERE path = ?", ("big.py",)).fetchone()["id"]
+
+        ranked = [{"file_id": file_id, "file_path": "big.py", "rank": 0, "rrf_score": 1.0}]
+
+        full = pack_context(ranked, db, tmp_path, budget=4000, budget_scale=1.0)
+        scaled = pack_context(ranked, db, tmp_path, budget=4000, budget_scale=0.5)
+
+        full_chars = sum(p["char_count"] for p in full)
+        scaled_chars = sum(p["char_count"] for p in scaled)
+
+        # With scale 0.5, we should either pack less content or drop to a
+        # leaner granularity — either way the packed total cannot exceed the
+        # scaled budget.
+        assert scaled_chars <= 2000
+        assert full_chars <= 4000
+        assert scaled_chars <= full_chars
+
+    def test_model_param_applies_scale(self, tmp_path):
+        from nexus.rank.packer import pack_context
+        from nexus.store.db import NexusDB
+
+        src = tmp_path / "big.py"
+        src.write_text("# x\n" * 2000)
+
+        db = NexusDB(tmp_path / ".nexus" / "nexus.db")
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO files (path, sha256, language, line_count, byte_size, last_parsed) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("big.py", "deadbeef", "python", 2000, src.stat().st_size, 0.0),
+            )
+            file_id = conn.execute("SELECT id FROM files WHERE path = ?", ("big.py",)).fetchone()["id"]
+
+        ranked = [{"file_id": file_id, "file_path": "big.py", "rank": 0, "rrf_score": 1.0}]
+
+        packed_47 = pack_context(ranked, db, tmp_path, budget=5000, model="claude-opus-4-7")
+        packed_46 = pack_context(ranked, db, tmp_path, budget=5000, model="claude-opus-4-6")
+
+        chars_47 = sum(p["char_count"] for p in packed_47)
+        chars_46 = sum(p["char_count"] for p in packed_46)
+
+        # 4.7 gets effective budget 3750; 4.6 gets 5000.
+        assert chars_47 <= 3750
+        assert chars_46 <= 5000
+
+    def test_default_no_model_matches_old_behavior(self, tmp_path):
+        """Regression guard: existing callers that don't pass `model` are unaffected."""
+        from nexus.rank.packer import pack_context
+        from nexus.store.db import NexusDB
+
+        src = tmp_path / "big.py"
+        src.write_text("# x\n" * 2000)
+
+        db = NexusDB(tmp_path / ".nexus" / "nexus.db")
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO files (path, sha256, language, line_count, byte_size, last_parsed) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("big.py", "deadbeef", "python", 2000, src.stat().st_size, 0.0),
+            )
+            file_id = conn.execute("SELECT id FROM files WHERE path = ?", ("big.py",)).fetchone()["id"]
+
+        ranked = [{"file_id": file_id, "file_path": "big.py", "rank": 0, "rrf_score": 1.0}]
+
+        packed = pack_context(ranked, db, tmp_path, budget=5000)  # no model
+        chars = sum(p["char_count"] for p in packed)
+        assert chars <= 5000  # full budget available

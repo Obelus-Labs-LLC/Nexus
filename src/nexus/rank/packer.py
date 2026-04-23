@@ -32,6 +32,45 @@ DEFAULT_BUDGET = 32_000  # ~8k tokens — fits within Claude Code's tool result 
 # Aider uses 100. We're a bit more generous because real code does have long lines.
 MAX_LINE_CHARS = 160
 
+# Per-model char-budget scale factors. Values below 1.0 shrink the effective
+# budget because that model's tokenizer inflates chars→tokens and we risk
+# blowing the MCP tool-result ceiling if we pack naively.
+#
+# Claude Opus 4.7 tokenizer expands 1.0–1.35× vs. 4.6 on real code (see
+# `research/reports/opus_46_vs_47_public_opinion.md` §2.4). 0.75 is the
+# conservative midpoint: a 16K budget becomes 12K, which comfortably fits
+# under 40K chars of decoded tokens.
+_MODEL_BUDGET_SCALES: dict[str, float] = {
+    "claude-opus-4-7": 0.75,
+    "claude-opus-4.7": 0.75,
+    "opus-4.7": 0.75,
+    "opus-4-7": 0.75,
+    "claude-opus-4-6": 1.0,
+    "claude-opus-4.6": 1.0,
+    "opus-4.6": 1.0,
+    "claude-sonnet-4-5": 1.0,
+    "sonnet-4.5": 1.0,
+    "claude-haiku-4-5": 1.0,
+    "haiku-4.5": 1.0,
+}
+
+
+def budget_scale_for_model(model: str | None) -> float:
+    """Return the char-budget scale factor for a model identifier.
+
+    Unknown models return 1.0 (no scaling). Matching is case-insensitive and
+    tolerates common variants (``opus-4.7`` vs ``claude-opus-4-7``).
+    """
+    if not model:
+        return 1.0
+    key = model.strip().lower()
+    if key in _MODEL_BUDGET_SCALES:
+        return _MODEL_BUDGET_SCALES[key]
+    # Fuzzy fallback: look for the family+version substring anywhere.
+    if "opus" in key and ("4-7" in key or "4.7" in key):
+        return 0.75
+    return 1.0
+
 # Files that deserve priority regardless of BM25/PageRank (Aider's filter_important_files).
 _IMPORTANT_FILENAMES: frozenset[str] = frozenset({
     "readme.md", "readme.rst", "readme.txt", "readme",
@@ -74,6 +113,8 @@ def pack_context(
     project_root: Path,
     budget: int = DEFAULT_BUDGET,
     query: str = "",
+    model: str | None = None,
+    budget_scale: float | None = None,
 ) -> list[dict[str, Any]]:
     """Pack ranked files into a context budget.
 
@@ -82,9 +123,22 @@ def pack_context(
 
     The `query` parameter (if provided) is used to boost files matching mentioned
     identifiers, mirroring Aider's mentioned_idents behavior.
+
+    Args:
+        model: Optional target model identifier (e.g. ``"claude-opus-4-7"``).
+            Used to look up a tokenizer-aware budget scale; overridden by an
+            explicit ``budget_scale``.
+        budget_scale: Explicit multiplier applied to ``budget`` before packing.
+            Values below 1.0 shrink the effective budget to compensate for
+            tokenizer inflation on newer models.
     """
+    scale = budget_scale if budget_scale is not None else budget_scale_for_model(model)
+    if scale <= 0:
+        scale = 1.0
+    effective_budget = int(budget * scale)
+
     packed: list[dict[str, Any]] = []
-    remaining = budget
+    remaining = effective_budget
 
     # Reorder: promote important files (README, CLAUDE.md, pyproject.toml) to the
     # top when they appear anywhere in the ranked list. This gives agents the

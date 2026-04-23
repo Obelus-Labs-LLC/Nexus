@@ -537,27 +537,38 @@ def register(mcp):
         """Store a cross-session decision that persists across conversations.
 
         Use this for decisions, blockers, next steps, or facts that future sessions
-        should know about. Entries auto-expire after 7 days.
+        should know about. Regular entries auto-expire after 7 days.
 
-        Max 20 words per entry. Max 15 active decisions shown at session start.
+        Max 20 words per entry (60 for locked). Max 15 active non-locked
+        decisions shown at session start; locked entries are always shown.
 
         Args:
-            content: What to remember (max 20 words).
-            type: One of: decision, task, next, fact, blocker.
+            content: What to remember. Max 20 words for standard types,
+                60 words for locked invariants.
+            type: One of: decision, task, next, fact, blocker, locked.
+                ``locked`` entries never expire and are pinned to the top of
+                every session start — use sparingly for invariants and
+                do-not-violate rules.
             tags: Comma-separated tags for filtering.
         """
         check_rate_limit()
-        from nexus.session.memory import remember, get_active_decisions
+        from nexus.session.memory import (
+            MAX_WORDS,
+            MAX_WORDS_LOCKED,
+            get_active_decisions,
+            remember,
+        )
 
         # Validate type
-        valid_types = {"decision", "task", "next", "fact", "blocker"}
+        valid_types = {"decision", "task", "next", "fact", "blocker", "locked"}
         if type not in valid_types:
             return f"Invalid type '{type}'. Must be one of: {', '.join(sorted(valid_types))}"
 
-        # Validate content length
+        # Validate content length (locked gets a larger cap)
+        max_words = MAX_WORDS_LOCKED if type == "locked" else MAX_WORDS
         word_count = len(content.split())
-        if word_count > 20:
-            return f"Content too long ({word_count} words). Max 20 words."
+        if word_count > max_words:
+            return f"Content too long ({word_count} words). Max {max_words} words for type '{type}'."
 
         db = get_db()
         tracker = get_tracker()
@@ -572,9 +583,14 @@ def register(mcp):
 
         active = get_active_decisions(db)
         logger.info("Remembered [%s]: %s", type, content)
+        if type == "locked":
+            return (
+                f"Remembered [LOCKED, no TTL]: {content}\n"
+                f"Active decisions: {len(active)} (locked entries always shown)"
+            )
         return (
             f"Remembered [{type}]: {content}\n"
-            f"Active decisions: {len(active)}/15"
+            f"Active decisions: {len(active)}/15 + locked"
         )
 
     # ========================================================================

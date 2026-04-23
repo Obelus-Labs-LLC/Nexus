@@ -43,4 +43,29 @@ You have Nexus tools available. **Always prefer Nexus tools over built-in altern
 Call `nexus_register_edit` with the files you changed and a brief summary. This keeps the index current. Do this every time, not in batches.
 
 ## Cross-Session Decisions
-When making architectural decisions, discovering blockers, or identifying next steps, call `nexus_remember` (max 20 words). Types: decision, task, next, fact, blocker. Future sessions see these automatically.
+When making architectural decisions, discovering blockers, or identifying next steps, call `nexus_remember` (max 20 words). Types: decision, task, next, fact, blocker, **locked**. Future sessions see these automatically. **`locked` entries never expire and are pinned to the top of every session** — use for invariants and do-not-violate rules.
+
+---
+
+## Behavior anchors (Claude 4.7+ mitigations)
+
+These anchors counter regressions observed in Claude 4.7 around literal instruction-following, argumentation, and fabricated side effects. They apply to every session in this project.
+
+1. **Literal instruction-following.** Follow the user's instruction as written. Do not reinterpret "fix the failing test" as "edit the test so it passes" — change the code under test unless the user explicitly says otherwise. If an instruction is ambiguous, ask one clarifying question before acting; do not silently substitute your own interpretation.
+2. **No re-litigation.** Once a decision is recorded via `nexus_remember(type="locked")` or `nexus_remember(type="decision")`, treat it as settled. Do not re-argue the decision, propose reversing it, or add "but consider..." caveats unless the user reopens the topic. If you believe a locked decision is wrong, surface the concern once, in one sentence, then comply.
+3. **Do not modify tests to make them pass.** Tests are the specification. If a test fails, fix the code, not the test — unless the user asks you to change the test contract or the test itself is demonstrably wrong (state your reasoning and cite the broken assertion).
+4. **No silent scope expansion.** Do what was asked, nothing more. If you notice an out-of-scope issue worth fixing, flag it separately (e.g. via `nexus_remember(type="next")`). Do not bundle it into the current change.
+
+## Side-effect verification (no fabricated hashes)
+
+Never report a side effect you did not observe. This applies especially to:
+
+- **Git commits** — never state a commit SHA, branch state, or "pushed to remote" without running the command and reading the actual output. If a `git commit` or `git push` was not executed in this session, do not claim it happened. When you do commit, quote the real SHA from `git rev-parse HEAD` or the `git commit` output; do not paraphrase or invent one.
+- **File writes** — after editing a file, the Edit/Write tool's own success response is the verification. Do not claim you "also updated X" unless there is a corresponding tool call in this session.
+- **Test/build runs** — only report pass/fail based on actual command output. If tests were not run, say so. Do not narrate hypothetical results.
+
+If you are unsure whether a side effect occurred, run a verification command (`git log -1`, `git status`, `ls`, etc.) and quote the output.
+
+## Thinking-display note
+
+If extended-thinking mode is available in this environment, set `thinking.display: "full"` explicitly so reasoning is visible. Summarized thinking hides the chain of reasoning that makes Claude auditable — prefer full display for any session that writes code, modifies state, or executes commands.
